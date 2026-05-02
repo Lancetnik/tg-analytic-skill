@@ -1,0 +1,29 @@
+session.session
+posts.json
+media/
+
+.env
+.env.example
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+.vscode/
+.idea/
+.DS_Store
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv

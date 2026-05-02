@@ -1,0 +1,10 @@
+[project]
+name = "tg-scraper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "telethon>=1.36",
+    "python-dotenv>=1.0",
+]
