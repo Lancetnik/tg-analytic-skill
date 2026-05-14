@@ -308,6 +308,7 @@ async def scrape(
     output_dir: Path,
     session_file: str,
     limit: int | None = None,
+    offset_id: int = 0,
     with_comments: bool = True,
     with_media: bool = True,
     with_channel_info: bool = True,
@@ -325,8 +326,14 @@ async def scrape(
 
     raw: list[Message] = [
         msg
-        async for msg in client.iter_messages(channel, limit=limit)
-        if isinstance(msg, Message)
+        async for msg in client.iter_messages(
+            channel,
+            limit=limit,
+            # Iterate oldest -> newest, starting at (and including) offset_id.
+            reverse=True,
+            # Telethon's offset_id is exclusive; -1 makes --offset-id inclusive.
+            offset_id=offset_id - 1 if offset_id else 0,
+        )
     ]
     log.info("fetched %d messages", len(raw))
 
@@ -429,6 +436,12 @@ def main(
         int | None,
         typer.Option(help="Max number of messages to fetch (all if omitted)."),
     ] = None,
+    offset_id: Annotated[
+        int,
+        typer.Option(
+            help="Start from this post id, fetching only older posts (0 = latest)."
+        ),
+    ] = 0,
     comments: Annotated[
         bool,
         typer.Option(help="Fetch post comments."),
@@ -447,7 +460,14 @@ def main(
     """Run the scraper."""
     asyncio.run(
         scrape(
-            channel, output_dir, session_file, limit, comments, media, channel_info
+            channel,
+            output_dir,
+            session_file,
+            limit,
+            offset_id,
+            comments,
+            media,
+            channel_info,
         )
     )
 
