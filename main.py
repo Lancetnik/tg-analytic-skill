@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, UTC
 import json
 import logging
 import os
@@ -30,10 +31,16 @@ log = logging.getLogger(__name__)
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 PHONE = os.environ["TG_PHONE"]
+
 CHANNEL = "@fastnewsdev"
 SESSION_FILE = "session"
-OUTPUT_FILE = "posts.json"
-MEDIA_DIR = Path("media")
+
+ROOT_DIR = Path("/Users/nikitapastukhov/Desktop/Documents/tg-channel")
+
+OUTPUT_FILE = (
+    ROOT_DIR / f"posts_{datetime.now(UTC).strftime('%Y-%m-%d_%H-%M-%S')}.json"
+)
+MEDIA_DIR = ROOT_DIR / "media"
 
 
 @dataclass
@@ -90,12 +97,14 @@ async def get_public_forwards(
 ) -> list[ForwardInfo]:
     result_list: list[ForwardInfo] = []
     try:
-        result = await client(GetMessagePublicForwardsRequest(
-            channel=channel_entity,
-            msg_id=msg_id,
-            offset="",
-            limit=100,
-        ))
+        result = await client(
+            GetMessagePublicForwardsRequest(
+                channel=channel_entity,
+                msg_id=msg_id,
+                offset="",
+                limit=100,
+            )
+        )
         for fwd in result.forwards:
             if not isinstance(fwd, PublicForwardMessage):
                 continue
@@ -103,12 +112,18 @@ async def get_public_forwards(
             try:
                 entity = await client.get_entity(peer)
                 username = getattr(entity, "username", None)
-                ch_link = f"https://t.me/{username}" if username else f"https://t.me/c/{peer.channel_id}"
-                result_list.append(ForwardInfo(
-                    msg_link=f"{ch_link}/{fwd.message.id}",
-                    channel_link=ch_link,
-                    peer=peer,
-                ))
+                ch_link = (
+                    f"https://t.me/{username}"
+                    if username
+                    else f"https://t.me/c/{peer.channel_id}"
+                )
+                result_list.append(
+                    ForwardInfo(
+                        msg_link=f"{ch_link}/{fwd.message.id}",
+                        channel_link=ch_link,
+                        peer=peer,
+                    )
+                )
             except Exception as e:
                 log.error("msg %d: failed to resolve forward peer (%s)", msg_id, e)
         if result_list:
@@ -138,12 +153,14 @@ async def get_comments(
                     "name": (first + " " + last).strip() or None,
                     "username": getattr(sender, "username", None),
                 }
-            comments.append({
-                "id": c.id,
-                "date": c.date.isoformat() if c.date else None,
-                "text": c.text or "",
-                "author": author,
-            })
+            comments.append(
+                {
+                    "id": c.id,
+                    "date": c.date.isoformat() if c.date else None,
+                    "text": c.text or "",
+                    "author": author,
+                }
+            )
     except Exception as e:
         log.error("msg %d: failed to fetch comments (%s)", msg.id, e)
     comments.sort(key=lambda c: c["id"])
@@ -249,10 +266,13 @@ async def build_post(
     parent = next((m for m in group if m.text), group[0])
 
     attachments = [
-        serialize_attach(m, channel, await download_photo(client, m))
-        for m in group
+        serialize_attach(m, channel, await download_photo(client, m)) for m in group
     ]
-    fwd_data = await get_public_forwards(client, channel_entity, parent.id) if parent.forwards else []
+    fwd_data = (
+        await get_public_forwards(client, channel_entity, parent.id)
+        if parent.forwards
+        else []
+    )
     _register_forwards(fwd_data, parent.id, channel_map)
     comments = await get_comments(client, channel_entity, parent)
     return serialize_message(
@@ -306,19 +326,29 @@ async def scrape(limit: int | None = None) -> None:
 
     for msg in standalone:
         photo = await download_photo(client, msg)
-        fwd_data = await get_public_forwards(client, channel_entity, msg.id) if msg.forwards else []
+        fwd_data = (
+            await get_public_forwards(client, channel_entity, msg.id)
+            if msg.forwards
+            else []
+        )
         _register_forwards(fwd_data, msg.id, channel_map)
         comments = await get_comments(client, channel_entity, msg)
-        posts.append(serialize_message(
-            msg, CHANNEL, photo,
-            public_forwards=[f.msg_link for f in fwd_data],
-            comments=comments,
-        ))
+        posts.append(
+            serialize_message(
+                msg,
+                CHANNEL,
+                photo,
+                public_forwards=[f.msg_link for f in fwd_data],
+                comments=comments,
+            )
+        )
         done += 1
         log.info("[%d/%d] processed msg %d", done, total, msg.id)
 
     for group in groups.values():
-        posts.append(await build_post(client, channel_entity, group, CHANNEL, channel_map))
+        posts.append(
+            await build_post(client, channel_entity, group, CHANNEL, channel_map)
+        )
         done += 1
         ids = [m.id for m in group]
         log.info("[%d/%d] processed group %s", done, total, ids)
@@ -329,18 +359,23 @@ async def scrape(limit: int | None = None) -> None:
     channels = []
     for ch_link, record in channel_map.items():
         ch_info = await get_channel_info(client, record.peer)
-        channels.append({
-            "link": ch_link,
-            "name": ch_info.name,
-            "description": ch_info.description,
-            "subscribers": ch_info.subscribers,
-            "shared_posts": sorted(record.post_ids),
-        })
+        channels.append(
+            {
+                "link": ch_link,
+                "name": ch_info.name,
+                "description": ch_info.description,
+                "subscribers": ch_info.subscribers,
+                "shared_posts": sorted(record.post_ids),
+            }
+        )
     channels.sort(key=lambda c: c["link"])
 
     output = {"posts": posts, "channels": channels}
-    Path(OUTPUT_FILE).write_text(json.dumps(output, ensure_ascii=False, indent=2))
-    log.info("saved %d posts, %d channels to %s", len(posts), len(channels), OUTPUT_FILE)
+
+    OUTPUT_FILE.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+    log.info(
+        "saved %d posts, %d channels to %s", len(posts), len(channels), OUTPUT_FILE
+    )
 
     await client.disconnect()
     log.info("done")
