@@ -7,4 +7,5 @@ requires-python = ">=3.11"
 dependencies = [
     "telethon>=1.36",
     "python-dotenv>=1.0",
+    "typer>=0.25.1",
 ]

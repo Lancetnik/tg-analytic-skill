@@ -6,7 +6,9 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
+import typer
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import GetFullChannelRequest
@@ -32,15 +34,9 @@ API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 PHONE = os.environ["TG_PHONE"]
 
-CHANNEL = "@fastnewsdev"
-SESSION_FILE = "session"
-
-ROOT_DIR = Path("/Users/nikitapastukhov/Desktop/Documents/tg-channel")
-
-OUTPUT_FILE = (
-    ROOT_DIR / f"posts_{datetime.now(UTC).strftime('%Y-%m-%d_%H-%M-%S')}.json"
-)
-MEDIA_DIR = ROOT_DIR / "media"
+DEFAULT_CHANNEL = "@fastnewsdev"
+DEFAULT_SESSION_FILE = "session.session"
+DEFAULT_OUTPUT_DIR = Path("data")
 
 
 @dataclass
@@ -182,11 +178,13 @@ async def get_channel_info(client: TelegramClient, peer) -> ChannelInfo:
         return ChannelInfo(name=None, description=None, subscribers=None)
 
 
-async def download_photo(client: TelegramClient, msg: Message) -> str | None:
-    if not isinstance(msg.media, MessageMediaPhoto):
+async def download_photo(
+    client: TelegramClient, msg: Message, media_dir: Path, with_media: bool
+) -> str | None:
+    if not with_media or not isinstance(msg.media, MessageMediaPhoto):
         return None
-    MEDIA_DIR.mkdir(exist_ok=True)
-    dest = MEDIA_DIR / f"{msg.id}.jpg"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    dest = media_dir / f"{msg.id}.jpg"
     if dest.exists():
         log.debug("msg %d: photo already cached", msg.id)
         return str(dest)
@@ -261,12 +259,18 @@ async def build_post(
     group: list[Message],
     channel: str,
     channel_map: dict[str, ChannelRecord],
+    media_dir: Path,
+    with_comments: bool,
+    with_media: bool,
 ) -> dict:
     group.sort(key=lambda m: m.id)
     parent = next((m for m in group if m.text), group[0])
 
     attachments = [
-        serialize_attach(m, channel, await download_photo(client, m)) for m in group
+        serialize_attach(
+            m, channel, await download_photo(client, m, media_dir, with_media)
+        )
+        for m in group
     ]
     fwd_data = (
         await get_public_forwards(client, channel_entity, parent.id)
@@ -274,7 +278,9 @@ async def build_post(
         else []
     )
     _register_forwards(fwd_data, parent.id, channel_map)
-    comments = await get_comments(client, channel_entity, parent)
+    comments = (
+        await get_comments(client, channel_entity, parent) if with_comments else []
+    )
     return serialize_message(
         parent,
         channel,
@@ -297,16 +303,29 @@ def _register_forwards(
             record.post_ids.append(post_id)
 
 
-async def scrape(limit: int | None = None) -> None:
-    client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+async def scrape(
+    channel: str,
+    output_dir: Path,
+    session_file: str,
+    limit: int | None = None,
+    with_comments: bool = True,
+    with_media: bool = True,
+    with_channel_info: bool = True,
+) -> None:
+    output_file = (
+        output_dir / f"posts_{datetime.now(UTC).strftime('%Y-%m-%d_%H-%M-%S')}.json"
+    )
+    media_dir = output_dir / "media"
+
+    client = TelegramClient(session_file, API_ID, API_HASH)
     await client.start(phone=PHONE)
 
-    channel_entity = await client.get_entity(CHANNEL)
-    log.info("authenticated, scraping %s", CHANNEL)
+    channel_entity = await client.get_entity(channel)
+    log.info("authenticated, scraping %s", channel)
 
     raw: list[Message] = [
         msg
-        async for msg in client.iter_messages(CHANNEL, limit=limit)
+        async for msg in client.iter_messages(channel, limit=limit)
         if isinstance(msg, Message)
     ]
     log.info("fetched %d messages", len(raw))
@@ -325,18 +344,20 @@ async def scrape(limit: int | None = None) -> None:
     done = 0
 
     for msg in standalone:
-        photo = await download_photo(client, msg)
+        photo = await download_photo(client, msg, media_dir, with_media)
         fwd_data = (
             await get_public_forwards(client, channel_entity, msg.id)
             if msg.forwards
             else []
         )
         _register_forwards(fwd_data, msg.id, channel_map)
-        comments = await get_comments(client, channel_entity, msg)
+        comments = (
+            await get_comments(client, channel_entity, msg) if with_comments else []
+        )
         posts.append(
             serialize_message(
                 msg,
-                CHANNEL,
+                channel,
                 photo,
                 public_forwards=[f.msg_link for f in fwd_data],
                 comments=comments,
@@ -347,7 +368,16 @@ async def scrape(limit: int | None = None) -> None:
 
     for group in groups.values():
         posts.append(
-            await build_post(client, channel_entity, group, CHANNEL, channel_map)
+            await build_post(
+                client,
+                channel_entity,
+                group,
+                channel,
+                channel_map,
+                media_dir,
+                with_comments,
+                with_media,
+            )
         )
         done += 1
         ids = [m.id for m in group]
@@ -358,28 +388,69 @@ async def scrape(limit: int | None = None) -> None:
     log.info("resolving %d forwarding channels", len(channel_map))
     channels = []
     for ch_link, record in channel_map.items():
-        ch_info = await get_channel_info(client, record.peer)
-        channels.append(
-            {
-                "link": ch_link,
-                "name": ch_info.name,
-                "description": ch_info.description,
-                "subscribers": ch_info.subscribers,
-                "shared_posts": sorted(record.post_ids),
-            }
-        )
+        entry = {"link": ch_link}
+        if with_channel_info:
+            ch_info = await get_channel_info(client, record.peer)
+            entry["name"] = ch_info.name
+            entry["description"] = ch_info.description
+            entry["subscribers"] = ch_info.subscribers
+        entry["shared_posts"] = sorted(record.post_ids)
+        channels.append(entry)
     channels.sort(key=lambda c: c["link"])
 
     output = {"posts": posts, "channels": channels}
 
-    OUTPUT_FILE.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(json.dumps(output, ensure_ascii=False, indent=2))
     log.info(
-        "saved %d posts, %d channels to %s", len(posts), len(channels), OUTPUT_FILE
+        "saved %d posts, %d channels to %s", len(posts), len(channels), output_file
     )
 
     await client.disconnect()
     log.info("done")
 
 
+app = typer.Typer(help="Scrape posts, forwards and comments from a Telegram channel.")
+
+
+@app.command()
+def main(
+    channel: Annotated[
+        str, typer.Option(help="Telegram channel username to scrape.")
+    ] = DEFAULT_CHANNEL,
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Directory for the output JSON and downloaded media."),
+    ] = DEFAULT_OUTPUT_DIR,
+    session_file: Annotated[
+        str, typer.Option(help="Telethon session file name.")
+    ] = DEFAULT_SESSION_FILE,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Max number of messages to fetch (all if omitted)."),
+    ] = None,
+    comments: Annotated[
+        bool,
+        typer.Option(help="Fetch post comments."),
+    ] = True,
+    media: Annotated[
+        bool,
+        typer.Option(help="Download post media."),
+    ] = True,
+    channel_info: Annotated[
+        bool,
+        typer.Option(
+            help="Resolve detail info about outer public channels that forwarded posts."
+        ),
+    ] = True,
+) -> None:
+    """Run the scraper."""
+    asyncio.run(
+        scrape(
+            channel, output_dir, session_file, limit, comments, media, channel_info
+        )
+    )
+
+
 if __name__ == "__main__":
-    asyncio.run(scrape())
+    app()
