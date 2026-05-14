@@ -309,6 +309,7 @@ async def scrape(
     session_file: str,
     limit: int | None = None,
     offset_id: int = 0,
+    offset_date: datetime | None = None,
     with_comments: bool = True,
     with_media: bool = True,
     with_channel_info: bool = True,
@@ -333,6 +334,8 @@ async def scrape(
             reverse=True,
             # Telethon's offset_id is exclusive; -1 makes --offset-id inclusive.
             offset_id=offset_id - 1 if offset_id else 0,
+            # With reverse=True, fetches messages newer than this date.
+            offset_date=offset_date,
         )
     ]
     log.info("fetched %d messages", len(raw))
@@ -442,6 +445,13 @@ def main(
             help="Start from this post id, fetching only older posts (0 = latest)."
         ),
     ] = 0,
+    offset_date: Annotated[
+        datetime | None,
+        typer.Option(
+            formats=["%d-%m-%Y", "%d-%m-%Y %H:%M:%S"],
+            help="Start from this date, fetching only newer posts.",
+        ),
+    ] = None,
     comments: Annotated[
         bool,
         typer.Option(help="Fetch post comments."),
@@ -465,6 +475,7 @@ def main(
             session_file,
             limit,
             offset_id,
+            offset_date,
             comments,
             media,
             channel_info,

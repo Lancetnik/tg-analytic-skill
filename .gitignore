@@ -1,6 +1,6 @@
 session.session
 posts.json
-media/
+data/
 
 .env
 .env.example
