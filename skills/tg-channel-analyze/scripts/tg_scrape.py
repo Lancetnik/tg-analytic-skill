@@ -32,6 +32,7 @@ from telethon.tl.types import (
     Message,
     MessageMediaDocument,
     MessageMediaPhoto,
+    PeerChannel,
     PublicForwardMessage,
     ReactionPaid,
     StatsGraph,
@@ -45,15 +46,29 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+# Telethon's network chatter (Connecting/Disconnecting) is pure noise for an
+# LLM consuming the output - keep only warnings/errors from it.
+logging.getLogger("telethon").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
+
+# Per-post progress prints every Nth post at INFO; per-post lines go to DEBUG.
+PROGRESS_EVERY = 50
+
+
+def _log_progress(done: int, total: int, what: str) -> None:
+    log.debug("[%d/%d] processed %s", done, total, what)
+    if done == total or done % PROGRESS_EVERY == 0:
+        log.info("[%d/%d] processed (latest: %s)", done, total, what)
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 PHONE = os.environ["TG_PHONE"]
 
-DEFAULT_CHANNEL = "@fastnewsdev"
-DEFAULT_SESSION_FILE = "session.session"
-DEFAULT_OUTPUT_DIR = Path("data")
+SKILL_DIR = Path(__file__).parent.parent
+
+DEFAULT_OUTPUT_DIR = SKILL_DIR / "data"
+DEFAULT_SESSION_FILE = SKILL_DIR / "session.session"
+
 
 
 # ---------------------------------------------------------------------------
@@ -62,14 +77,15 @@ DEFAULT_OUTPUT_DIR = Path("data")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
-    id               INTEGER PRIMARY KEY,
-    link             TEXT,
-    date             TEXT,
-    text             TEXT,
-    edit_date        TEXT,
-    reply_to_msg_id  INTEGER,
-    tags             TEXT,
-    grouped_id       INTEGER
+    id                     INTEGER PRIMARY KEY,
+    link                   TEXT,
+    date                   TEXT,
+    text                   TEXT,
+    edit_date              TEXT,
+    reply_to_msg_id        INTEGER,
+    tags                   TEXT,
+    grouped_id             INTEGER,
+    forwarder_from_channel TEXT
 );
 
 CREATE TABLE IF NOT EXISTS post_attachments (
@@ -202,6 +218,44 @@ def count_reactions(msg: Message) -> tuple[int, int]:
     return reactions, stars
 
 
+async def get_forward_source(
+    client: TelegramClient, msg: Message
+) -> ForwardInfo | None:
+    """If `msg` is itself a forward of a channel post, resolve the source.
+
+    Returns the source channel as a ForwardInfo so the caller can register it
+    in the same channel_map used for outbound forwarders - the source then
+    gets persisted to `public_channels` alongside everything else.
+    Returns None for non-channel forwards (user/chat) and hidden senders."""
+    fwd = msg.fwd_from
+    if not fwd or not getattr(fwd, "from_id", None):
+        return None
+    peer = fwd.from_id
+    if not isinstance(peer, PeerChannel):
+        return None
+
+    username: str | None = None
+    try:
+        entity = await client.get_entity(peer)
+        username = getattr(entity, "username", None)
+    except Exception as e:
+        # Private/restricted channels still leave us with channel_id, so we
+        # can persist them under the `t.me/c/<id>` form.
+        log.error("msg %d: failed to resolve fwd_from entity (%s)", msg.id, e)
+
+    ch_link = (
+        f"https://t.me/{username}"
+        if username
+        else f"https://t.me/c/{peer.channel_id}"
+    )
+    src_msg_id = getattr(fwd, "channel_post", None)
+    return ForwardInfo(
+        msg_link=f"{ch_link}/{src_msg_id}" if src_msg_id else "",
+        channel_link=ch_link,
+        peer=peer,
+    )
+
+
 async def get_public_forwards(
     client: TelegramClient, channel_entity, msg_id: int
 ) -> list[ForwardInfo]:
@@ -317,6 +371,7 @@ def upsert_post(
     channel: str,
     msg: Message,
     attachments: list[tuple[int, str, str | None, str | None]],
+    forwarder_from_channel: str | None = None,
 ) -> None:
     text = msg.text or ""
     tags = extract_tags(text)
@@ -324,16 +379,17 @@ def upsert_post(
         """
         INSERT INTO posts (
             id, link, date, text, edit_date,
-            reply_to_msg_id, tags, grouped_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            reply_to_msg_id, tags, grouped_id, forwarder_from_channel
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            link            = excluded.link,
-            date            = excluded.date,
-            text            = excluded.text,
-            edit_date       = excluded.edit_date,
-            reply_to_msg_id = excluded.reply_to_msg_id,
-            tags            = excluded.tags,
-            grouped_id      = excluded.grouped_id
+            link                   = excluded.link,
+            date                   = excluded.date,
+            text                   = excluded.text,
+            edit_date              = excluded.edit_date,
+            reply_to_msg_id        = excluded.reply_to_msg_id,
+            tags                   = excluded.tags,
+            grouped_id             = excluded.grouped_id,
+            forwarder_from_channel = excluded.forwarder_from_channel
         """,
         (
             msg.id,
@@ -348,6 +404,7 @@ def upsert_post(
             msg.reply_to_msg_id,
             json.dumps(tags, ensure_ascii=False) if tags else None,
             msg.grouped_id,
+            forwarder_from_channel,
         ),
     )
 
@@ -480,7 +537,12 @@ def _register_forwards(
             record.post_ids.append(post_id)
 
 
-def _post_summary(msg: Message, channel: str, comments_count: int) -> dict:
+def _post_summary(
+    msg: Message,
+    channel: str,
+    comments_count: int,
+    forwarder_from_channel: str | None,
+) -> dict:
     """Compact per-post record used by the stdout summary."""
     text = msg.text or ""
     reactions, stars = count_reactions(msg)
@@ -495,6 +557,7 @@ def _post_summary(msg: Message, channel: str, comments_count: int) -> dict:
         "stars": stars,
         "tags": extract_tags(text),
         "comments_count": comments_count,
+        "forwarder_from_channel": forwarder_from_channel,
     }
 
 
@@ -527,18 +590,27 @@ async def process_post(
     )
     _register_forwards(fwd_data, parent.id, channel_map)
 
+    # If this post is itself a forward of another channel, capture the source
+    # channel link and make sure that channel exists in `public_channels`.
+    fwd_source = await get_forward_source(client, parent)
+    forwarder_from_channel: str | None = None
+    if fwd_source is not None:
+        forwarder_from_channel = fwd_source.channel_link
+        if fwd_source.channel_link not in channel_map:
+            channel_map[fwd_source.channel_link] = ChannelRecord(peer=fwd_source.peer)
+
     comments = (
         await get_comments(client, channel_entity, parent) if with_comments else []
     )
 
-    upsert_post(conn, channel, parent, attachments)
+    upsert_post(conn, channel, parent, attachments, forwarder_from_channel)
     insert_metrics(conn, parent, scrape_date, len(comments), len(fwd_data))
     if with_comments:
         replace_comments(conn, parent.id, comments)
     upsert_public_shares(conn, parent.id, fwd_data, scrape_date)
     conn.commit()
 
-    return _post_summary(parent, channel, len(comments))
+    return _post_summary(parent, channel, len(comments), forwarder_from_channel)
 
 
 async def _persist_messages(
@@ -576,7 +648,7 @@ async def _persist_messages(
         )
         post_summaries.append(summary)
         done += 1
-        log.info("[%d/%d] processed msg %d", done, total, msg.id)
+        _log_progress(done, total, f"msg {msg.id}")
 
     for group in groups.values():
         summary = await process_post(
@@ -585,11 +657,9 @@ async def _persist_messages(
         )
         post_summaries.append(summary)
         done += 1
-        log.info(
-            "[%d/%d] processed group %s", done, total, [m.id for m in group]
-        )
+        _log_progress(done, total, f"group {[m.id for m in group]}")
 
-    log.info("resolving %d forwarding channels", len(channel_map))
+    log.debug("resolving %d forwarding channels", len(channel_map))
     channel_summaries: list[dict] = []
     for ch_link, record in channel_map.items():
         info = (
@@ -669,16 +739,9 @@ async def scrape(
         )
 
         db_path = db_path_for(output_dir, channel)
-        log.info(
-            "stored %d posts, %d channels in %s",
-            len(post_summaries),
-            len(channel_summaries),
-            db_path,
-        )
     finally:
         await client.disconnect()
         conn.close()
-    log.info("done")
 
     summarize_scrape(channel, post_summaries, channel_summaries, db_path)
 
@@ -722,16 +785,9 @@ async def fetch_by_ids(
         )
 
         db_path = db_path_for(output_dir, channel)
-        log.info(
-            "stored %d posts, %d channels in %s",
-            len(post_summaries),
-            len(channel_summaries),
-            db_path,
-        )
     finally:
         await client.disconnect()
         conn.close()
-    log.info("done")
 
     summarize_scrape(channel, post_summaries, channel_summaries, db_path)
 
@@ -764,8 +820,11 @@ def summarize_scrape(
         f"- Total forwards: {forwards:,} | reactions: {reactions:,} "
         f"| comments: {comments:,}"
     )
-    print(f"- Forwarding channels: {len(channels)}")
-    print(f"- Database: {db_path}")
+    # Outward forwarders only (channels that re-shared our posts). Inward
+    # sources we forwarded from are registered into the same channel_map for
+    # `public_channels` persistence but carry no `shared_posts`, so filter.
+    forwarders = [c for c in channels if c.get("shared_posts")]
+    print(f"- Forwarding channels: {len(forwarders)}")
 
     def top(key: str, n: int = 5) -> list[dict]:
         return sorted(posts, key=lambda p: p.get(key) or 0, reverse=True)[:n]
@@ -790,16 +849,54 @@ def summarize_scrape(
         for tag, count in tags.most_common(10):
             print(f"- #{tag}: {count}")
 
-    if channels:
+    def _fmt_ids(ids: list[int], cap: int = 10) -> str:
+        """Comma-joined ids, truncated with a trailing count if very long."""
+        if len(ids) <= cap:
+            return ", ".join(str(i) for i in ids)
+        head = ", ".join(str(i) for i in ids[:cap])
+        return f"{head}, ... (+{len(ids) - cap} more)"
+
+    if forwarders:
         print("\n## Top forwarding channels\n")
         ranked = sorted(
-            channels, key=lambda c: c.get("subscribers") or 0, reverse=True
+            forwarders, key=lambda c: c.get("subscribers") or 0, reverse=True
         )
         for c in ranked[:10]:
             subs = c.get("subscribers")
             subs_str = f"{subs:,} subs" if subs else "subs n/a"
             name = c.get("name") or c["link"]
-            print(f"- {name} ({subs_str}) | shared {len(c['shared_posts'])} post(s)")
+            post_ids = sorted(c["shared_posts"])
+            print(
+                f"- {name} ({subs_str}) | {c['link']} | "
+                f"shared: {_fmt_ids(post_ids)}"
+            )
+
+    # Channels we forwarded from (inward sources). Counts per source from the
+    # post summaries; details (name, subs) joined from `channels`.
+    citations: dict[str, list[int]] = {}
+    for p in posts:
+        link = p.get("forwarder_from_channel")
+        if link:
+            citations.setdefault(link, []).append(p["id"])
+
+    if citations:
+        by_link = {c["link"]: c for c in channels}
+        # Most-cited first; tiebreak by subscriber count (bigger source first).
+        ranked = sorted(
+            citations.items(),
+            key=lambda kv: (len(kv[1]), by_link.get(kv[0], {}).get("subscribers") or 0),
+            reverse=True,
+        )
+        print("\n## Top cited channels\n")
+        for link, post_ids in ranked[:10]:
+            info = by_link.get(link, {})
+            name = info.get("name") or link
+            subs = info.get("subscribers")
+            subs_str = f"{subs:,} subs" if subs else "subs n/a"
+            print(
+                f"- {name} ({subs_str}) | {link} | "
+                f"cited in: {_fmt_ids(sorted(post_ids))}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -946,7 +1043,6 @@ async def fetch_subscribers(
         len(source_rows),
         db_path,
     )
-    log.info("done")
 
     summarize_subscribers(channel, rows, db_path)
 
@@ -1014,7 +1110,6 @@ def summarize_subscribers(
         f"- Worst day: {worst} "
         f"(-{int(_as_number(rows[worst].get('leaves')))} leaves)"
     )
-    print(f"- Database: {db_path}")
 
     source_totals: Counter = Counter()
     for d in dates:
@@ -1088,15 +1183,15 @@ app = typer.Typer(help="Scrape posts, forwards and comments from a Telegram chan
 @app.command("scrape")
 def main(
     channel: Annotated[
-        str, typer.Option(help="Telegram channel username to scrape.")
-    ] = DEFAULT_CHANNEL,
+        str, typer.Option(help="Telegram channel username to scrape (required).")
+    ],
     output_dir: Annotated[
         Path,
         typer.Option(help="Directory for the SQLite DB and downloaded media."),
     ] = DEFAULT_OUTPUT_DIR,
     session_file: Annotated[
         str, typer.Option(help="Telethon session file name.")
-    ] = DEFAULT_SESSION_FILE,
+    ] = str(DEFAULT_SESSION_FILE),
     limit: Annotated[
         int | None,
         typer.Option(
@@ -1140,8 +1235,19 @@ def main(
             help="Resolve detail info about outer public channels that forwarded posts."
         ),
     ] = True,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v",
+            help="Per-post progress + Telethon network logs (otherwise every "
+            f"{PROGRESS_EVERY} posts).",
+        ),
+    ] = False,
 ) -> None:
     """Run the scraper."""
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("telethon").setLevel(logging.INFO)
     asyncio.run(
         scrape(
             channel,
@@ -1165,15 +1271,15 @@ def fetch_cmd(
         typer.Argument(help="One or more post ids, e.g. `fetch 103 105 108`."),
     ],
     channel: Annotated[
-        str, typer.Option(help="Telegram channel username to fetch from.")
-    ] = DEFAULT_CHANNEL,
+        str, typer.Option(help="Telegram channel username to fetch from (required).")
+    ],
     output_dir: Annotated[
         Path,
         typer.Option(help="Directory for the SQLite DB and downloaded media."),
     ] = DEFAULT_OUTPUT_DIR,
     session_file: Annotated[
         str, typer.Option(help="Telethon session file name.")
-    ] = DEFAULT_SESSION_FILE,
+    ] = str(DEFAULT_SESSION_FILE),
     comments: Annotated[
         bool,
         typer.Option(help="Fetch post comments."),
@@ -1188,11 +1294,22 @@ def fetch_cmd(
             help="Resolve detail info about outer public channels that forwarded posts."
         ),
     ] = True,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose", "-v",
+            help="Per-post progress + Telethon network logs (otherwise every "
+            f"{PROGRESS_EVERY} posts).",
+        ),
+    ] = False,
 ) -> None:
     """Fetch specific posts by id and persist them like `scrape` does.
 
     Useful for refreshing a known post or pulling a small set without
     iterating the whole channel history. Missing ids are logged and skipped."""
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("telethon").setLevel(logging.INFO)
     asyncio.run(
         fetch_by_ids(
             channel,
@@ -1209,15 +1326,18 @@ def fetch_cmd(
 @app.command("subscribers")
 def subscribers(
     channel: Annotated[
-        str, typer.Option(help="Telegram channel username (you must be an admin).")
-    ] = DEFAULT_CHANNEL,
+        str,
+        typer.Option(
+            help="Telegram channel username, required (you must be an admin)."
+        ),
+    ],
     output_dir: Annotated[
         Path,
         typer.Option(help="Directory for the SQLite DB."),
     ] = DEFAULT_OUTPUT_DIR,
     session_file: Annotated[
         str, typer.Option(help="Telethon session file name.")
-    ] = DEFAULT_SESSION_FILE,
+    ] = str(DEFAULT_SESSION_FILE),
 ) -> None:
     """Export daily subscriber dynamics into the SQLite DB
     (subscribers + subscriber_sources tables)."""
@@ -1227,11 +1347,14 @@ def subscribers(
 @app.command("views")
 def views(
     channel: Annotated[
-        str, typer.Option(help="Telegram channel username (you must be an admin).")
-    ] = DEFAULT_CHANNEL,
+        str,
+        typer.Option(
+            help="Telegram channel username, required (you must be an admin)."
+        ),
+    ],
     session_file: Annotated[
         str, typer.Option(help="Telethon session file name.")
-    ] = DEFAULT_SESSION_FILE,
+    ] = str(DEFAULT_SESSION_FILE),
 ) -> None:
     """Print views per hour of day to the console: hour|views."""
     asyncio.run(fetch_views_by_hour(channel, session_file))

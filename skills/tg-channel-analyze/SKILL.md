@@ -160,6 +160,9 @@ you opened. Dates are ISO-8601 strings.
 - `reply_to_msg_id` int - if the post is a reply
 - `tags` text - JSON array of hashtags (no `#`)
 - `grouped_id` int - Telegram album id; non-null = multi-attachment post
+- `forwarder_from_channel` text - if this post is itself a forward of another
+  channel's post, the source channel's link (joins `public_channels.link`);
+  null otherwise. Source channels are auto-added to `public_channels`.
 
 ### `post_attachments` (PK: `post_id`, `attachment_id`)
 - `attachment_id` int - == `post_id` for single-media posts; differs for album members
@@ -207,7 +210,10 @@ you opened. Dates are ISO-8601 strings.
 
 - Latest engagement per post: `posts p JOIN post_metrics m ON p.id = m.post_id`
   (combine with the latest-per-post predicate above)
-- Forwarders for a post: `public_shares s JOIN public_channels c ON s.forwarder_link = c.link WHERE s.post_id = ?`
+- Outward forwarders of a post (who re-shared us):
+  `public_shares s JOIN public_channels c ON s.forwarder_link = c.link WHERE s.post_id = ?`
+- Inward forward source of a post (who we forwarded from):
+  `posts p JOIN public_channels c ON p.forwarder_from_channel = c.link WHERE p.id = ?`
 - Album items: `post_attachments WHERE post_id = ?`
 
 ## Interpreting results
