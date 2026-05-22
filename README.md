@@ -26,7 +26,7 @@ From any project where you want the skill available to Claude Code, use the
 # List available skills in this repo
 npx skills@latest add Lancetnik/tg-analytic-skill --list
 
-# Install into the current project (./.claude/skills/tg-analyze/)
+# Install into the current project (./.claude/skills/tg-channel-analyze/)
 npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-channel-analyze
 
 # Or install globally
@@ -43,7 +43,7 @@ The scraping commands need Telegram API credentials
 directory, copy the bundled `.env.example` and fill it in:
 
 ```bash
-cd .claude/skills/tg-analyze
+cd .claude/skills/tg-channel-analyze
 cp .env.example .env
 # edit .env: TG_API_ID, TG_API_HASH, TG_PHONE
 ```
@@ -73,7 +73,7 @@ Inside Claude Code, ask the skill to analyze a channel:
 Or run the bundled CLIs directly:
 
 ```bash
-cd .claude/skills/tg-analyze
+cd .claude/skills/tg-channel-analyze
 
 # Fast first look — newest 100, skip media downloads
 uv run scripts/tg_scrape.py scrape --channel @some_channel --latest 100 --no-media

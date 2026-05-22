@@ -1,13 +1,35 @@
 ---
-name: tg-analyze
+name: tg-channel-analyze
 description: >-
-  Analyze a Telegram channel - scrape posts/comments/forwards, track subscriber
-  growth and churn by source, and inspect views by hour of day. Use when the
-  user wants to understand a Telegram channel's content, engagement, audience
-  dynamics, or posting performance. Runs the bundled tg_scrape.py CLI.
+  Use this skill when the user wants to analyze a Telegram channel — scrape
+  posts, comments, forwards, and per-post engagement over time, or pull
+  subscriber growth/churn by source and views by hour of day from Telegram's
+  stats API. Covers content, engagement, audience dynamics, and posting
+  performance. Do not use for one-off reads of a single message, for private
+  chats the logged-in account doesn't admin.
+  Runs the bundled tg_scrape.py CLI.
 ---
 
 # Telegram channel analysis
+
+## When to use
+
+- Use for **channel-level** analytics: content history, engagement over time, audience growth, forwarder networks, posting-time optimization.
+- Do **not** use to read a single specific message — call Telethon directly or open the link.
+- Do **not** use to read private chats or channels the account doesn't have at least observer access to. `subscribers` and `views` additionally require **admin** rights on a channel large enough for Telegram to compute stats.
+- Always confirm the channel handle with the user before the first scrape — a typo silently creates a new empty DB at `data/<typo>.db`.
+
+## Reporting back to the user
+
+Every command prints a Markdown summary block to stdout. Use it as-is:
+
+1. One-line headline (channel, time range, headline metric).
+2. Paste the script's stdout summary.
+3. If the user asked for depth the summary doesn't cover, follow with a
+   `tg_query.py` result (Markdown table — already formatted for chat).
+
+Don't paraphrase the summary; the script already pre-computes the
+most-asked questions.
 
 ## First-run setup (do this before any scraping)
 
@@ -165,79 +187,38 @@ LLM-generated SQL). Output is a Markdown table. `--limit N` caps rows (default
 100, `0` = unlimited). `--no-truncate` to see full cell content (post body,
 long comments). Use whenever the user asks for data not in the stdout summary.
 
-## Database schema (data/&lt;channel&gt;.db)
+## Database schema
 
-One file per channel. No `channel` column anywhere - it's implicit in which DB
-you opened. Dates are ISO-8601 strings.
+Read [references/schema.md](references/schema.md) before writing SQL with
+`tg_query.py`. It documents every table, primary key, and the common joins
+(latest metric per post, outward forwarders, inward citation, album items).
 
-### `posts` (PK: `id`)
-- `id` int - Telegram message id
-- `link` text - `https://t.me/<channel>/<id>`
-- `date` text - publish timestamp
-- `text` text - post body
-- `edit_date` text - non-null only if edited
-- `reply_to_msg_id` int - if the post is a reply
-- `tags` text - JSON array of hashtags (no `#`)
-- `grouped_id` int - Telegram album id; non-null = multi-attachment post
-- `forwarder_from_channel` text - if this post is itself a forward of another
-  channel's post, the source channel's link (joins `public_channels.link`);
-  null otherwise. Source channels are auto-added to `public_channels`.
+## Validation
 
-### `post_attachments` (PK: `post_id`, `attachment_id`)
-- `attachment_id` int - == `post_id` for single-media posts; differs for album members
-- `link` text - `https://t.me/<channel>/<attachment_id>`
-- `media_type` text - `photo`, `document`, or other Telethon class name
-- `photo_path` text - local JPEG path (null when `--no-media`)
+After running a command, sanity-check the result before reporting:
 
-### `post_metrics` (PK: `id` autoincrement, **append-only time series**)
-- `post_id` int - FK-style to `posts.id`
-- `scrape_date` text - ISO timestamp of the scrape run
-- `views`, `forwards`, `reactions`, `stars`, `comments_count`, `public_forwards_count` int
-- Latest per post:
-  ```sql
-  SELECT ... FROM post_metrics
-  WHERE (post_id, scrape_date) IN (
-      SELECT post_id, MAX(scrape_date) FROM post_metrics GROUP BY post_id
-  )
+- After `scrape` / `fetch` — confirm rows landed:
   ```
+  uv run scripts/tg_query.py --channel @name \
+    "SELECT COUNT(*) posts, MIN(date) oldest, MAX(date) newest FROM posts"
+  ```
+  If `posts` is 0, the channel handle or session is wrong, not the scrape.
+- After `subscribers` — the stdout summary's `period:` line should match the
+  window the user asked for. If empty, the channel is below Telegram's stats
+  threshold.
+- After `views` — expect 24 hourly buckets in the summary. Fewer means a thin stats window; mention this to the user instead of inventing peaks.
 
-### `post_comments` (PK: `post_id`, `id`)
-- `id` int - comment message id
-- `date`, `text`, `author_id`, `author_name`, `author_username`
+## Common errors
 
-### `public_channels` (PK: `link`)
-- `link` text - `https://t.me/<username>` or `https://t.me/c/<id>` for private
-- `name`, `description`, `subscribers` - filled when `--channel-info` was on
-- `last_seen` text - latest scrape that observed this channel
+| Symptom (stderr) | Cause | Fix |
+| --- | --- | --- |
+| `Telegram session not found at session.session` | First run, or session deleted | Tell user to run `uv run scripts/tg_scrape.py login` in their own terminal. Do not try to run it yourself — it needs interactive stdin. |
+| `failed to get stats ... you must be an admin of a channel that is large enough` | Account isn't admin, or channel < ~500 subs | Skill cannot do `subscribers`/`views` here. Fall back to `scrape` + `post_metrics` for engagement signals. |
+| `no followers graph available` / `no top-hours graph available` | Stats exist but the requested graph is empty | Report to user; no retry helps. |
+| New, empty `data/<handle>.db` appeared | Channel handle typo | Confirm the handle with the user; delete the empty DB before re-running. |
 
-### `public_shares` (PK: `post_id`, `forwarder_link`, `msg_link`)
-- `forwarder_link` text - joins to `public_channels(link)`
-- `msg_link` text - the forwarded message in the outer channel
-- `first_seen` text - scrape timestamp that first observed this share
+Telethon may also surface `FloodWaitError` mid-scrape on very large channels — the script logs and continues per item where possible. If a run aborts, re-run with `--offset-id <last-seen-id>` to resume forward rather than restart.
 
-### `subscribers` (PK: `date`)
-- `date` text - YYYY-MM-DD (UTC)
-- `total` int - subscribers at end of day
-- `joins`, `leaves` int - daily counts (leaves stored as positive)
+## Long-running history
 
-### `subscriber_sources` (PK: `date`, `source`)
-- `source` text - Telegram label (`URL`, `Search`, `Groups`, `Channels`,
-  `Other`, etc.)
-- `count` int - joins from this source on this date
-
-### Common joins
-
-- Latest engagement per post: `posts p JOIN post_metrics m ON p.id = m.post_id`
-  (combine with the latest-per-post predicate above)
-- Outward forwarders of a post (who re-shared us):
-  `public_shares s JOIN public_channels c ON s.forwarder_link = c.link WHERE s.post_id = ?`
-- Inward forward source of a post (who we forwarded from):
-  `posts p JOIN public_channels c ON p.forwarder_from_channel = c.link WHERE p.id = ?`
-- Album items: `post_attachments WHERE post_id = ?`
-
-## Interpreting results
-
-- Lead with the stdout summary; it's pre-computed for the most common
-  questions.
-- For anything beyond it, use the `query` command rather than raw `sqlite3` - it enforces read-only and prints a Markdown table the user can read directly.
-- The `subscribers` / `views` periods are already the maximum Telegram offers. To build longer subscriber history, schedule `subscribers` periodically - upserts keep old rows.
+`subscribers` and `views` periods are already the maximum Telegram offers. To build longer subscriber history, schedule `subscribers` periodically — upserts keep old rows.
