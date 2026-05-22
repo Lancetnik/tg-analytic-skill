@@ -1,5 +1,5 @@
 ---
-name: tg-channel-analyze
+name: tg-analytic-skill
 description: >-
   Use this skill when the user wants to analyze a Telegram channel — scrape
   posts, comments, forwards, and per-post engagement over time, or pull

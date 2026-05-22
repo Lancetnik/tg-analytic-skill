@@ -1,4 +1,4 @@
-# tg-channel-analyze
+# tg-analytic-skill
 
 A [Claude Code](https://claude.com/claude-code) skill that analyzes a Telegram
 channel:
@@ -26,14 +26,14 @@ From any project where you want the skill available to Claude Code, use the
 # List available skills in this repo
 npx skills@latest add Lancetnik/tg-analytic-skill --list
 
-# Install into the current project (./.claude/skills/tg-channel-analyze/)
-npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-channel-analyze
+# Install into the current project (./.claude/skills/tg-analytic-skill/)
+npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-analytic-skill
 
 # Or install globally
-npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-channel-analyze --global
+npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-analytic-skill --global
 
 # Non-interactive
-npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-channel-analyze --yes
+npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-analytic-skill --yes
 ```
 
 ## First-run setup
@@ -43,7 +43,7 @@ The scraping commands need Telegram API credentials
 directory, copy the bundled `.env.example` and fill it in:
 
 ```bash
-cd .claude/skills/tg-channel-analyze
+cd .claude/skills/tg-analytic-skill
 cp .env.example .env
 # edit .env: TG_API_ID, TG_API_HASH, TG_PHONE
 ```
@@ -73,7 +73,7 @@ Inside Claude Code, ask the skill to analyze a channel:
 Or run the bundled CLIs directly:
 
 ```bash
-cd .claude/skills/tg-channel-analyze
+cd .claude/skills/tg-analytic-skill
 
 # Fast first look — newest 100, skip media downloads
 uv run scripts/tg_scrape.py scrape --channel @some_channel --latest 100 --no-media
@@ -104,13 +104,13 @@ views and reactions, top tags, outward forwarders and inward citations with
 their post ids) — usually you can read the answer off that without dropping
 into SQL.
 
-Full command reference lives in [`skills/tg-channel-analyze/SKILL.md`](./skills/tg-channel-analyze/SKILL.md).
+Full command reference lives in [`skills/tg-analytic-skill/SKILL.md`](./skills/tg-analytic-skill/SKILL.md).
 
 ## Repository layout
 
 ```
 skills/
-  tg-channel-analyze/
+  tg-analytic-skill/
     SKILL.md          Skill instructions (frontmatter + body).
     scripts/
       tg_scrape.py    Telethon-based CLI (scrape, fetch, subscribers, views).
