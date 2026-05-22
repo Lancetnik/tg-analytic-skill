@@ -126,8 +126,13 @@ retention window.
 uv run scripts/tg_scrape.py views --channel @name
 ```
 
-Prints views per hour of day (0-23, UTC): peak hours, quietest hours, and the
-full 24-hour breakdown. Console output only.
+Prints views per hour of day (0-23): peak hours, quietest hours, and the full
+24-hour breakdown. Console output only.
+
+Hours are in the **Telegram account's local timezone**, not UTC - that's what
+the stats API returns and there's no offset to convert from. When reporting
+peak hours to the user, say e.g. "20:00 local time (channel admin's tz)" so
+they don't misread it as UTC.
 
 ### `query` - ad-hoc SQL
 

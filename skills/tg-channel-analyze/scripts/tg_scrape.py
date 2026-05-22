@@ -1059,7 +1059,10 @@ def summarize_views(channel: str, hours: list, views: list, period) -> None:
         f"{period.max_date.date().isoformat()}"
     )
     print(f"- Total views in sample: {int(total):,}")
-    print("- Hour is hour-of-day, 0-23 (UTC).")
+    print(
+        "- Hour is hour-of-day, 0-23, in the Telegram account's local "
+        "timezone (NOT UTC)."
+    )
 
     print("\n## Peak hours\n")
     for hour, value in ranked[:3]:
