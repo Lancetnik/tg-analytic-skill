@@ -619,12 +619,29 @@ async def scrape(
     limit: int | None = None,
     offset_id: int = 0,
     offset_date: datetime | None = None,
+    latest: int | None = None,
     with_comments: bool = True,
     with_media: bool = True,
     with_channel_info: bool = True,
 ) -> None:
     scrape_date = datetime.now(UTC).isoformat()
     media_dir = output_dir / "media"
+
+    # `--latest N` flips iteration to newest-first to actually return the
+    # most recent N posts. `--limit N` alone keeps the chronological
+    # (oldest-first) walk, which is what you want when paging forward from
+    # an offset.
+    if latest is not None:
+        reverse = False
+        iter_limit = latest
+        iter_offset_id = 0
+        iter_offset_date = None
+    else:
+        reverse = True
+        iter_limit = limit
+        # Telethon's offset_id is exclusive; -1 makes --offset-id inclusive.
+        iter_offset_id = offset_id - 1 if offset_id else 0
+        iter_offset_date = offset_date
 
     conn = open_db(output_dir, channel)
     client = TelegramClient(session_file, API_ID, API_HASH)
@@ -638,13 +655,10 @@ async def scrape(
             msg
             async for msg in client.iter_messages(
                 channel,
-                limit=limit,
-                # Iterate oldest -> newest, starting at (and including) offset_id.
-                reverse=True,
-                # Telethon's offset_id is exclusive; -1 makes --offset-id inclusive.
-                offset_id=offset_id - 1 if offset_id else 0,
-                # With reverse=True, fetches messages newer than this date.
-                offset_date=offset_date,
+                limit=iter_limit,
+                reverse=reverse,
+                offset_id=iter_offset_id,
+                offset_date=iter_offset_date,
             )
         ]
         log.info("fetched %d messages", len(raw))
@@ -1082,19 +1096,31 @@ def main(
     ] = DEFAULT_SESSION_FILE,
     limit: Annotated[
         int | None,
-        typer.Option(help="Max number of messages to fetch (all if omitted)."),
+        typer.Option(
+            help="Max messages fetched in the chronological walk. Use with "
+            "--offset-id/--offset-date to cap a forward page; for 'N newest' "
+            "use --latest instead."
+        ),
     ] = None,
     offset_id: Annotated[
         int,
         typer.Option(
-            help="Start from this post id, fetching only older posts (0 = latest)."
+            help="Start at this post id (inclusive) and walk forward to newer "
+            "posts. 0 = walk from the beginning of history."
         ),
     ] = 0,
     offset_date: Annotated[
         datetime | None,
         typer.Option(
             formats=["%d-%m-%Y", "%d-%m-%Y %H:%M:%S"],
-            help="Start from this date, fetching only newer posts.",
+            help="Start after this date and walk forward to newer posts.",
+        ),
+    ] = None,
+    latest: Annotated[
+        int | None,
+        typer.Option(
+            help="Fetch the N most recent posts (newest-first). Overrides "
+            "--limit/--offset-id/--offset-date."
         ),
     ] = None,
     comments: Annotated[
@@ -1121,6 +1147,7 @@ def main(
             limit,
             offset_id,
             offset_date,
+            latest,
             comments,
             media,
             channel_info,
