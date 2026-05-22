@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(rtk read *)"
+      "Bash(rtk read *)",
+      "Bash(rtk wc *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk git status *)",
+      "Bash(rtk git diff *)",
+      "Bash(rtk gh repo view *)"
     ]
   }
 }
