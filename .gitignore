@@ -3,7 +3,6 @@ posts.json
 data/
 
 .env
-.env.example
 .env.local
 .env.development.local
 .env.test.local
@@ -35,3 +34,7 @@ wheels/
 
 # Node
 node_modules/
+
+.agents
+.claude/skills/
+skills-lock.json

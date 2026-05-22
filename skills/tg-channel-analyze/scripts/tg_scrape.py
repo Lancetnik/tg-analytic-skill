@@ -55,10 +55,10 @@ log = logging.getLogger(__name__)
 PROGRESS_EVERY = 50
 
 
-def _log_progress(done: int, total: int, what: str) -> None:
-    log.debug("[%d/%d] processed %s", done, total, what)
+def _log_progress(done: int, total: int, current: str, id_range: str) -> None:
+    log.debug("[%d/%d] processed %s", done, total, current)
     if done == total or done % PROGRESS_EVERY == 0:
-        log.info("[%d/%d] processed (latest: %s)", done, total, what)
+        log.info("[%d/%d] processed (ids: %s)", done, total, id_range)
 
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
@@ -68,6 +68,22 @@ SKILL_DIR = Path(__file__).parent.parent
 
 DEFAULT_OUTPUT_DIR = SKILL_DIR / "data"
 DEFAULT_SESSION_FILE = SKILL_DIR / "session.session"
+
+
+def _require_session(session_file: str) -> None:
+    """Fail fast if no Telethon session exists.
+
+    Auth needs an interactive TTY for the SMS code prompt, so it cannot run
+    inside a Bash subprocess. Surface that with a clear message instead of
+    deadlocking on input()."""
+    if not Path(session_file).exists():
+        typer.echo(
+            f"Telegram session not found at {session_file}\n"
+            "Run `uv run scripts/tg_scrape.py login` in your own terminal first "
+            "(interactive — needs an SMS code).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 
@@ -640,6 +656,8 @@ async def _persist_messages(
     channel_map: dict[str, ChannelRecord] = {}
     total = len(standalone) + len(groups)
     done = 0
+    all_ids = [m.id for m in raw]
+    id_range = f"{min(all_ids)}..{max(all_ids)}" if all_ids else "—"
 
     for msg in standalone:
         summary = await process_post(
@@ -648,7 +666,7 @@ async def _persist_messages(
         )
         post_summaries.append(summary)
         done += 1
-        _log_progress(done, total, f"msg {msg.id}")
+        _log_progress(done, total, f"msg {msg.id}", id_range)
 
     for group in groups.values():
         summary = await process_post(
@@ -657,7 +675,7 @@ async def _persist_messages(
         )
         post_summaries.append(summary)
         done += 1
-        _log_progress(done, total, f"group {[m.id for m in group]}")
+        _log_progress(done, total, f"group {[m.id for m in group]}", id_range)
 
     log.debug("resolving %d forwarding channels", len(channel_map))
     channel_summaries: list[dict] = []
@@ -1245,6 +1263,7 @@ def main(
     ] = False,
 ) -> None:
     """Run the scraper."""
+    _require_session(session_file)
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("telethon").setLevel(logging.INFO)
@@ -1307,6 +1326,7 @@ def fetch_cmd(
 
     Useful for refreshing a known post or pulling a small set without
     iterating the whole channel history. Missing ids are logged and skipped."""
+    _require_session(session_file)
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("telethon").setLevel(logging.INFO)
@@ -1341,6 +1361,7 @@ def subscribers(
 ) -> None:
     """Export daily subscriber dynamics into the SQLite DB
     (subscribers + subscriber_sources tables)."""
+    _require_session(session_file)
     asyncio.run(fetch_subscribers(channel, output_dir, session_file))
 
 
@@ -1357,7 +1378,29 @@ def views(
     ] = str(DEFAULT_SESSION_FILE),
 ) -> None:
     """Print views per hour of day to the console: hour|views."""
+    _require_session(session_file)
     asyncio.run(fetch_views_by_hour(channel, session_file))
+
+
+@app.command("login")
+def login(
+    session_file: Annotated[
+        str, typer.Option(help="Telethon session file name.")
+    ] = str(DEFAULT_SESSION_FILE),
+) -> None:
+    """One-time interactive Telegram auth.
+
+    Run this **in your own terminal** (not via Claude Code's Bash tool) before
+    using scrape/fetch/subscribers/views. Telethon prompts on stdin for the
+    SMS code (and the 2FA password if you have one enabled), then writes the
+    session file. Subsequent commands reuse it."""
+    async def _go() -> None:
+        client = TelegramClient(session_file, API_ID, API_HASH)
+        await client.start(phone=PHONE)
+        await client.disconnect()
+
+    asyncio.run(_go())
+    typer.echo(f"Saved Telegram session to {session_file}")
 
 
 if __name__ == "__main__":

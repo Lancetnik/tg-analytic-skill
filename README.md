@@ -38,18 +38,29 @@ npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-channel-analyze --y
 
 ## First-run setup
 
-The scraping commands need Telegram API credentials. In the install target
-directory:
+The scraping commands need Telegram API credentials
+([create them here](https://my.telegram.org/apps)). In the install target
+directory, copy the bundled `.env.example` and fill it in:
 
 ```bash
 cd .claude/skills/tg-analyze
-echo "TG_API_ID=...
-TG_API_HASH=...
-TG_PHONE=+..." > .env
+cp .env.example .env
+# edit .env: TG_API_ID, TG_API_HASH, TG_PHONE
 ```
 
-The first `tg_scrape.py` run prompts for a login code interactively; subsequent
-runs reuse `session.session`.
+If you ask Claude to analyze a channel before `.env` exists, the skill will
+prompt you for the three values and write the file for you.
+
+Then authenticate once — **in your own terminal**, not via Claude — so
+Telethon can prompt for the SMS code and 2FA password on stdin:
+
+```bash
+uv run scripts/tg_scrape.py login
+```
+
+This writes `session.session`; every later scrape/fetch/subscribers/views
+reuses it. If the session file is missing, those commands exit with an
+explicit error pointing back at `login`.
 
 ## Usage
 

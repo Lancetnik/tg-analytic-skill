@@ -17,7 +17,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DEFAULT_OUTPUT_DIR = Path("data")
+SKILL_DIR = Path(__file__).parent.parent
+DEFAULT_OUTPUT_DIR = SKILL_DIR / "data"
 
 # Strip leading `-- line comments` and `/* block comments */` so we can inspect
 # the first real keyword. We don't try to parse strings - any leading SELECT

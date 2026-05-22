@@ -9,6 +9,25 @@ description: >-
 
 # Telegram channel analysis
 
+## First-run setup (do this before any scraping)
+
+The `scrape`/`fetch`/`subscribers`/`views` commands need two things in the skill directory: a `.env` with Telegram API credentials, and a `session.session` from a one-time interactive login. The `query` command needs neither.
+
+If `.env` is missing:
+
+1. Ask the user for their `TG_API_ID`, `TG_API_HASH`, and `TG_PHONE` (international format, e.g. `+15551234567`). Point them at https://my.telegram.org/apps to create credentials if they don't have them.
+2. Copy `.env.example` to `.env` and fill in the values they provided. Do not commit `.env`.
+
+If `session.session` is missing, the next scrape/fetch/subscribers/views command will exit with an explicit error. When that happens, **stop and tell the user to run**:
+
+```
+uv run scripts/tg_scrape.py login
+```
+
+**in their own terminal** (not via you) — Telethon prompts on stdin for an SMS code and a 2FA password if enabled, which only works in an interactive TTY. Once it writes `session.session`, re-run the original command.
+
+## CLIs
+
 Two CLIs under `scripts/`:
 
 - **`tg_scrape.py`** - talks to Telegram. Commands: `scrape`, `fetch`,
