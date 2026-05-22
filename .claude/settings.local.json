@@ -6,6 +6,7 @@
       "Bash(rtk grep *)",
       "Bash(rtk git status *)",
       "Bash(rtk git diff *)",
+      "Bash(rtk git log *)",
       "Bash(rtk gh repo view *)"
     ]
   }
