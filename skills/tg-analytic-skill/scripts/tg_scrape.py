@@ -39,7 +39,8 @@ from telethon.tl.types import (
     StatsGraphAsync,
 )
 
-load_dotenv()
+DATA_DIR = Path.cwd() / ".tg-analytic"
+load_dotenv(DATA_DIR / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,10 +65,8 @@ API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 PHONE = os.environ["TG_PHONE"]
 
-SKILL_DIR = Path(__file__).parent.parent
-
-DEFAULT_OUTPUT_DIR = SKILL_DIR / "data"
-DEFAULT_SESSION_FILE = SKILL_DIR / "session.session"
+DEFAULT_OUTPUT_DIR = DATA_DIR
+DEFAULT_SESSION_FILE = DATA_DIR / "session.session"
 
 
 def _require_session(session_file: str) -> None:
@@ -172,7 +171,7 @@ CREATE TABLE IF NOT EXISTS subscriber_sources (
 
 
 def db_path_for(output_dir: Path, channel: str) -> Path:
-    """One DB file per channel, e.g. data/fastnewsdev.db."""
+    """One DB file per channel, e.g. .tg-analytic/fastnewsdev.db."""
     safe = channel.lstrip("@").replace("/", "_") or "channel"
     return output_dir / f"{safe}.db"
 
@@ -875,7 +874,7 @@ def summarize_scrape(
         return f"{head}, ... (+{len(ids) - cap} more)"
 
     if forwarders:
-        print("\n## Top forwarding channels\n")
+        print("\n## Forwarding channels\n")
         ranked = sorted(
             forwarders, key=lambda c: c.get("subscribers") or 0, reverse=True
         )
@@ -889,31 +888,22 @@ def summarize_scrape(
                 f"shared: {_fmt_ids(post_ids)}"
             )
 
-    # Channels we forwarded from (inward sources). Counts per source from the
-    # post summaries; details (name, subs) joined from `channels`.
-    citations: dict[str, list[int]] = {}
-    for p in posts:
-        link = p.get("forwarder_from_channel")
-        if link:
-            citations.setdefault(link, []).append(p["id"])
-
-    if citations:
+    # Our posts that forward/cite another channel — one row per post, newest
+    # first. Source channel name/subs joined from `channels`.
+    cited_posts = [p for p in posts if p.get("forwarder_from_channel")]
+    if cited_posts:
         by_link = {c["link"]: c for c in channels}
-        # Most-cited first; tiebreak by subscriber count (bigger source first).
-        ranked = sorted(
-            citations.items(),
-            key=lambda kv: (len(kv[1]), by_link.get(kv[0], {}).get("subscribers") or 0),
-            reverse=True,
-        )
-        print("\n## Top cited channels\n")
-        for link, post_ids in ranked[:10]:
+        print("\n## Cited Posts\n")
+        for p in sorted(cited_posts, key=lambda p: p["id"], reverse=True):
+            link = p["forwarder_from_channel"]
             info = by_link.get(link, {})
             name = info.get("name") or link
             subs = info.get("subscribers")
             subs_str = f"{subs:,} subs" if subs else "subs n/a"
             print(
-                f"- {name} ({subs_str}) | {link} | "
-                f"cited in: {_fmt_ids(sorted(post_ids))}"
+                f"- #{p['id']} | {p['link']} | "
+                f"{_text_snippet(p.get('text'))} | "
+                f"source: {name} ({subs_str}) - {link}"
             )
 
 
@@ -1394,6 +1384,8 @@ def login(
     using scrape/fetch/subscribers/views. Telethon prompts on stdin for the
     SMS code (and the 2FA password if you have one enabled), then writes the
     session file. Subsequent commands reuse it."""
+    Path(session_file).parent.mkdir(parents=True, exist_ok=True)
+
     async def _go() -> None:
         client = TelegramClient(session_file, API_ID, API_HASH)
         await client.start(phone=PHONE)

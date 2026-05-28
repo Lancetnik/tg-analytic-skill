@@ -17,8 +17,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-SKILL_DIR = Path(__file__).parent.parent
-DEFAULT_OUTPUT_DIR = SKILL_DIR / "data"
+DEFAULT_OUTPUT_DIR = Path.cwd() / ".tg-analytic"
 
 # Strip leading `-- line comments` and `/* block comments */` so we can inspect
 # the first real keyword. We don't try to parse strings - any leading SELECT
@@ -59,7 +58,7 @@ def validate_read_only(sql: str) -> None:
 
 
 def db_path_for(output_dir: Path, channel: str) -> Path:
-    """One DB file per channel, e.g. data/fastnewsdev.db."""
+    """One DB file per channel, e.g. .tg-analytic/fastnewsdev.db."""
     safe = channel.lstrip("@").replace("/", "_") or "channel"
     return output_dir / f"{safe}.db"
 
@@ -117,13 +116,13 @@ def query(sql: str, channel: str, output_dir: Path, limit: int, no_truncate: boo
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run a read-only SQL query against data/<channel>.db and print a Markdown table.",
+        description="Run a read-only SQL query against .tg-analytic/<channel>.db and print a Markdown table.",
     )
     parser.add_argument("sql", help="SQL SELECT statement to run against the channel DB.")
     parser.add_argument(
         "--channel",
         required=True,
-        help="Channel username; picks data/<channel>.db (required).",
+        help="Channel username; picks .tg-analytic/<channel>.db (required).",
     )
     parser.add_argument(
         "--output-dir",

@@ -1,6 +1,4 @@
-session.session
-posts.json
-data/
+.tg-analytic/
 
 .env
 .env.local
