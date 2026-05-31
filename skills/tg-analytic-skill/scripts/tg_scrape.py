@@ -22,6 +22,7 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.client.telegrambaseclient import DEFAULT_DC_ID, DEFAULT_IPV4_IP
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.stats import (
     GetBroadcastStatsRequest,
@@ -70,6 +71,53 @@ PHONE = os.environ["TG_PHONE"]
 
 DEFAULT_OUTPUT_DIR = DATA_DIR
 DEFAULT_SESSION_FILE = DATA_DIR / "session.session"
+
+# Telethon dials Telegram's data centers by fixed IP, which a domain-allowlist
+# sandbox blocks. Set TG_DC_DNS_SUFFIX to a wildcard-DNS domain (e.g. `nip.io`
+# or `sslip.io`, where `1.2.3.4.nip.io` resolves to 1.2.3.4) to make every DC
+# connection dial `<dc-ip>.<suffix>` instead - a hostname that resolves back to
+# the same MTProto IP, so you can allowlist just that one domain. Unset (default)
+# keeps the raw-IP behavior unchanged.
+DC_DNS_SUFFIX = os.environ.get("TG_DC_DNS_SUFFIX", "").strip().lstrip(".")
+
+
+def _strip_dc_suffix(addr: str | None) -> str | None:
+    """Drop a trailing `.<suffix>` so we never double-wrap a persisted address."""
+    if addr and DC_DNS_SUFFIX and addr.endswith(f".{DC_DNS_SUFFIX}"):
+        return addr[: -(len(DC_DNS_SUFFIX) + 1)]
+    return addr
+
+
+def make_client(session_file: str) -> TelegramClient:
+    """Build the Telethon client, optionally routing DCs via TG_DC_DNS_SUFFIX.
+
+    With the suffix set, both the bootstrap address (session.server_address) and
+    every DC resolved later for migrations / exported senders / media downloads
+    (`_get_dc`) are rewritten from `<ip>` to `<ip>.<suffix>`, so all traffic
+    leaves as hostname connections the sandbox can allowlist."""
+    client = TelegramClient(str(session_file), API_ID, API_HASH)
+    session = client.session
+    if not DC_DNS_SUFFIX or session is None:
+        return client
+
+    ip = _strip_dc_suffix(session.server_address) or DEFAULT_IPV4_IP
+    session.set_dc(
+        session.dc_id or DEFAULT_DC_ID,
+        f"{ip}.{DC_DNS_SUFFIX}",
+        session.port or 443,
+    )
+
+    _orig_get_dc = client._get_dc
+
+    async def _get_dc(dc_id, cdn=False):
+        dc = await _orig_get_dc(dc_id, cdn=cdn)
+        if not cdn and dc.ip_address and not dc.ip_address.endswith(f".{DC_DNS_SUFFIX}"):
+            dc.ip_address = f"{dc.ip_address}.{DC_DNS_SUFFIX}"
+        return dc
+
+    client._get_dc = _get_dc
+    log.info("routing Telegram DCs via *.%s (sandbox domain mode)", DC_DNS_SUFFIX)
+    return client
 
 
 def _require_session(session_file: str) -> None:
@@ -734,7 +782,7 @@ async def scrape(
         iter_offset_date = offset_date
 
     conn = open_db(output_dir, channel)
-    client = TelegramClient(session_file, API_ID, API_HASH)
+    client = make_client(session_file)
     await client.start(phone=PHONE)
 
     try:
@@ -779,7 +827,7 @@ async def fetch_by_ids(
     media_dir = output_dir / "media"
 
     conn = open_db(output_dir, channel)
-    client = TelegramClient(session_file, API_ID, API_HASH)
+    client = make_client(session_file)
     await client.start(phone=PHONE)
 
     try:
@@ -952,7 +1000,7 @@ def match_series(series: dict[str, list], *keywords: str) -> list | None:
 
 async def open_stats(channel: str, session_file: str):
     """Connect, resolve the channel and fetch its BroadcastStats."""
-    client = TelegramClient(session_file, API_ID, API_HASH)
+    client = make_client(session_file)
     await client.start(phone=PHONE)
 
     channel_entity = await client.get_entity(channel)
@@ -1390,7 +1438,7 @@ def login(
     Path(session_file).parent.mkdir(parents=True, exist_ok=True)
 
     async def _go() -> None:
-        client = TelegramClient(session_file, API_ID, API_HASH)
+        client = make_client(session_file)
         await client.start(phone=PHONE)
         await client.disconnect()
 
