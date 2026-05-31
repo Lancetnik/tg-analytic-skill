@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.10"
 # dependencies = [
 #     "telethon>=1.36,<2",
 #     "python-dotenv>=1.0",
@@ -15,7 +15,7 @@ import sqlite3
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -51,6 +51,9 @@ logging.basicConfig(
 # LLM consuming the output - keep only warnings/errors from it.
 logging.getLogger("telethon").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
+
+# `datetime.UTC` is 3.11+; alias it from `timezone.utc` for 3.10 compatibility.
+UTC = timezone.utc
 
 # Per-post progress prints every Nth post at INFO; per-post lines go to DEBUG.
 PROGRESS_EVERY = 50
