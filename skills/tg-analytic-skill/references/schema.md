@@ -46,9 +46,9 @@ CREATE TABLE post_comments (
     id               INTEGER NOT NULL,
     date             TEXT,
     text             TEXT,
-    author_id        INTEGER,
-    author_name      TEXT,
-    author_username  TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
     PRIMARY KEY (post_id, id)
 );
 
@@ -78,7 +78,7 @@ CREATE TABLE subscribers (
 CREATE TABLE subscriber_sources (
     date     TEXT    NOT NULL,
     source   TEXT    NOT NULL,
-    count    INTEGER,
+    joins    INTEGER,
     PRIMARY KEY (date, source)
 );
 ```
@@ -172,17 +172,18 @@ CREATE TABLE post_comments (
     id               INTEGER NOT NULL,
     date             TEXT,
     text             TEXT,
-    author_id        INTEGER,
-    author_name      TEXT,
-    author_username  TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
     PRIMARY KEY (post_id, id)
 );
 ```
 
 - `post_id` — FK to `posts.id`.
 - `id` — comment message id in the linked discussion group. Unique only within `post_id`.
-- `author_username` — without the leading `@`; NULL if the author has no public username.
-- `author_name` — display name; may be NULL or anonymized.
+- `user_id` — Telegram id of the commenter. When a comment was posted *as a channel* (Telegram's "send as" feature), this is the channel's id and `user_name`/`user_username` carry the channel's title/username.
+- `user_username` — without the leading `@`; NULL if the commenter has no public username.
+- `user_name` — display name; may be NULL or anonymized.
 
 ## `public_channels`
 
@@ -238,14 +239,14 @@ CREATE TABLE subscribers (
 CREATE TABLE subscriber_sources (
     date     TEXT    NOT NULL,
     source   TEXT    NOT NULL,
-    count    INTEGER,
+    joins    INTEGER,
     PRIMARY KEY (date, source)
 );
 ```
 
 - `date` — `YYYY-MM-DD` (UTC).
 - `source` — Telegram-supplied label. Observed values: `URL`, `Search`, `Groups`, `Channels`, `Other`. Don't assume the set is closed.
-- `count` — joins from this source on this date. Sum across all sources for a given `date` equals (or closely approximates) `subscribers.joins` for the same date.
+- `joins` — new subscribers from this source on this date. Sum across all sources for a given `date` equals (or closely approximates) `subscribers.joins` for the same date.
 
 ## Common joins
 

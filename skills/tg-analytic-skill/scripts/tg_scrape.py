@@ -183,9 +183,9 @@ CREATE TABLE IF NOT EXISTS post_comments (
     id               INTEGER NOT NULL,
     date             TEXT,
     text             TEXT,
-    author_id        INTEGER,
-    author_name      TEXT,
-    author_username  TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
     PRIMARY KEY (post_id, id)
 );
 
@@ -215,10 +215,20 @@ CREATE TABLE IF NOT EXISTS subscribers (
 CREATE TABLE IF NOT EXISTS subscriber_sources (
     date     TEXT    NOT NULL,
     source   TEXT    NOT NULL,
-    count    INTEGER,
+    joins    INTEGER,
     PRIMARY KEY (date, source)
 );
 """
+
+# Pre-rename column names -> current names, applied to existing DBs on open so
+# old `.db` files keep working without a re-scrape. SQLite RENAME COLUMN is a
+# cheap metadata-only operation (>= 3.25). Each entry: (table, old_col, new_col).
+COLUMN_RENAMES = [
+    ("post_comments", "author_id", "user_id"),
+    ("post_comments", "author_name", "user_name"),
+    ("post_comments", "author_username", "user_username"),
+    ("subscriber_sources", "count", "joins"),
+]
 
 
 def db_path_for(output_dir: Path, channel: str) -> Path:
@@ -227,10 +237,32 @@ def db_path_for(output_dir: Path, channel: str) -> Path:
     return output_dir / f"{safe}.db"
 
 
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """Rename legacy columns on pre-existing DBs to match the current schema.
+
+    Runs before CREATE TABLE IF NOT EXISTS so the rename happens on the old
+    table rather than being masked by a freshly-created one. A column is renamed
+    only when the old name is present and the new one isn't, so this is
+    idempotent and a no-op on new or already-migrated DBs."""
+    existing = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    for table, old, new in COLUMN_RENAMES:
+        if table not in existing:
+            continue
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if old in cols and new not in cols:
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+    conn.commit()
+
+
 def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
     output_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path_for(output_dir, channel))
     conn.execute("PRAGMA foreign_keys = ON")
+    _migrate_columns(conn)
     conn.executescript(SCHEMA)
     return conn
 
@@ -533,7 +565,7 @@ def replace_comments(
         """
         INSERT INTO post_comments (
             post_id, id, date, text,
-            author_id, author_name, author_username
+            user_id, user_name, user_username
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         [
@@ -1085,10 +1117,10 @@ async def fetch_subscribers(
         )
         conn.executemany(
             """
-            INSERT INTO subscriber_sources (date, source, count)
+            INSERT INTO subscriber_sources (date, source, joins)
             VALUES (?, ?, ?)
             ON CONFLICT(date, source) DO UPDATE SET
-                count = excluded.count
+                joins = excluded.joins
             """,
             source_rows,
         )
@@ -1119,11 +1151,11 @@ def _load_subscriber_rows(conn: sqlite3.Connection) -> dict[str, dict]:
             "leaves": leaves,
             "sources": {},
         }
-    for date, source, count in conn.execute(
-        "SELECT date, source, count FROM subscriber_sources"
+    for date, source, joins in conn.execute(
+        "SELECT date, source, joins FROM subscriber_sources"
     ):
         if date in rows:
-            rows[date]["sources"][source] = count
+            rows[date]["sources"][source] = joins
     return rows
 
 
