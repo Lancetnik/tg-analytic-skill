@@ -220,16 +220,6 @@ CREATE TABLE IF NOT EXISTS subscriber_sources (
 );
 """
 
-# Pre-rename column names -> current names, applied to existing DBs on open so
-# old `.db` files keep working without a re-scrape. SQLite RENAME COLUMN is a
-# cheap metadata-only operation (>= 3.25). Each entry: (table, old_col, new_col).
-COLUMN_RENAMES = [
-    ("post_comments", "author_id", "user_id"),
-    ("post_comments", "author_name", "user_name"),
-    ("post_comments", "author_username", "user_username"),
-    ("subscriber_sources", "count", "joins"),
-]
-
 
 def db_path_for(output_dir: Path, channel: str) -> Path:
     """One DB file per channel, e.g. .tg-analytic/fastnewsdev.db."""
@@ -237,32 +227,10 @@ def db_path_for(output_dir: Path, channel: str) -> Path:
     return output_dir / f"{safe}.db"
 
 
-def _migrate_columns(conn: sqlite3.Connection) -> None:
-    """Rename legacy columns on pre-existing DBs to match the current schema.
-
-    Runs before CREATE TABLE IF NOT EXISTS so the rename happens on the old
-    table rather than being masked by a freshly-created one. A column is renamed
-    only when the old name is present and the new one isn't, so this is
-    idempotent and a no-op on new or already-migrated DBs."""
-    existing = {
-        row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
-    }
-    for table, old, new in COLUMN_RENAMES:
-        if table not in existing:
-            continue
-        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if old in cols and new not in cols:
-            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
-    conn.commit()
-
-
 def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
     output_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path_for(output_dir, channel))
     conn.execute("PRAGMA foreign_keys = ON")
-    _migrate_columns(conn)
     conn.executescript(SCHEMA)
     return conn
 
