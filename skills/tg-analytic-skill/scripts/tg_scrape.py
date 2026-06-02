@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.client.telegrambaseclient import DEFAULT_DC_ID, DEFAULT_IPV4_IP
 from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.messages import GetScheduledHistoryRequest
 from telethon.tl.functions.stats import (
     GetBroadcastStatsRequest,
     GetMessagePublicForwardsRequest,
@@ -864,6 +865,11 @@ def _text_snippet(text: str | None, length: int = 80) -> str:
     return " ".join((text or "").split())[:length]
 
 
+def _md_cell(text: str | None) -> str:
+    """Snippet safe for a Markdown table cell - escape pipes, drop newlines."""
+    return _text_snippet(text).replace("|", "\\|") or "—"
+
+
 def summarize_scrape(
     channel: str, posts: list[dict], channels: list[dict], db_path: Path
 ) -> None:
@@ -880,71 +886,82 @@ def summarize_scrape(
     reactions = sum(p.get("reactions") or 0 for p in posts)
     comments = sum(p.get("comments_count") or 0 for p in posts)
 
-    print(f"- Posts: {n}")
-    if dates:
-        print(f"- Date range: {dates[0][:10]} -> {dates[-1][:10]}")
-    print(f"- Total views: {views:,} (avg {views // n:,}/post)")
-    print(
-        f"- Total forwards: {forwards:,} | reactions: {reactions:,} "
-        f"| comments: {comments:,}"
-    )
     # Outward forwarders only (channels that re-shared our posts). Inward
     # sources we forwarded from are registered into the same channel_map for
     # `public_channels` persistence but carry no `shared_posts`, so filter.
     forwarders = [c for c in channels if c.get("shared_posts")]
-    print(f"- Forwarding channels: {len(forwarders)}")
 
-    def top(key: str, n: int = 5) -> list[dict]:
-        return sorted(posts, key=lambda p: p.get(key) or 0, reverse=True)[:n]
+    print("## Overview\n")
+    span = f"  ({dates[0][:10]} → {dates[-1][:10]})" if dates else ""
+    print(f"- Posts: {n}{span}")
+    print(f"- Views: {views:,}  (avg {views // n:,}/post)")
+    print(f"- Reactions: {reactions:,}   Comments: {comments:,}   "
+          f"Forwards: {forwards:,}")
+    print(f"- Re-shared by: {len(forwarders)} channels")
 
-    print("\n## Top posts by views\n")
-    for p in top("views"):
+    # One combined ranking, sorted by views, with reactions alongside - half
+    # the lines of two separate tables and both signals visible at once.
+    top = sorted(posts, key=lambda p: p.get("views") or 0, reverse=True)[:10]
+    print("\n## Top posts\n")
+    print("| Views | Reactions | Post | Snippet |")
+    print("|------:|----------:|------|---------|")
+    for p in top:
         print(
-            f"- {p.get('views') or 0:,} views | {p['link']} | "
-            f"{_text_snippet(p.get('text'))}"
+            f"| {p.get('views') or 0:,} | {p.get('reactions') or 0:,} "
+            f"| {p['link']} | {_md_cell(p.get('text'))} |"
         )
-
-    print("\n## Top posts by reactions\n")
-    for p in top("reactions"):
-        print(
-            f"- {p.get('reactions') or 0:,} reactions | {p['link']} | "
-            f"{_text_snippet(p.get('text'))}"
-        )
-
-    tags = Counter(t for p in posts for t in p.get("tags", []))
-    if tags:
-        print("\n## Top tags\n")
-        for tag, count in tags.most_common(10):
-            print(f"- #{tag}: {count}")
-
-    def _fmt_ids(ids: list[int], cap: int = 10) -> str:
-        """Comma-joined ids, truncated with a trailing count if very long."""
-        if len(ids) <= cap:
-            return ", ".join(str(i) for i in ids)
-        head = ", ".join(str(i) for i in ids[:cap])
-        return f"{head}, ... (+{len(ids) - cap} more)"
 
     if forwarders:
-        print("\n## Forwarding channels\n")
-        ranked = sorted(
-            forwarders, key=lambda c: c.get("subscribers") or 0, reverse=True
+        # Group by post (not by channel): for each of our posts that got
+        # re-shared, list the channels that shared it. Inverts the
+        # forwarder->posts mapping we already have - no extra API calls.
+        post_by_id = {p["id"]: p for p in posts}
+        shares_by_post: dict[int, list[dict]] = {}
+        for c in forwarders:
+            for pid in c["shared_posts"]:
+                shares_by_post.setdefault(pid, []).append(c)
+        total_shares = sum(len(chs) for chs in shares_by_post.values())
+        print(
+            f"\n## Forwarded posts "
+            f"({len(shares_by_post)} of your posts re-shared, "
+            f"{total_shares} shares by {len(forwarders)} channels)\n"
         )
-        for c in ranked[:10]:
-            subs = c.get("subscribers")
-            subs_str = f"{subs:,} subs" if subs else "subs n/a"
-            name = c.get("name") or c["link"]
-            post_ids = sorted(c["shared_posts"])
-            print(
-                f"- {name} ({subs_str}) | {c['link']} | "
-                f"shared: {_fmt_ids(post_ids)}"
+        print(
+            "Each of your posts below was re-shared by the listed channels. "
+            "`subs` is each channel's size (the reach that share reached).\n"
+        )
+        for pid in sorted(shares_by_post, reverse=True):
+            chans = sorted(
+                shares_by_post[pid],
+                key=lambda c: c.get("subscribers") or 0,
+                reverse=True,
             )
+            p = post_by_id.get(pid)
+            if p is not None:
+                views = p.get("views")
+                views_str = f"{views:,} views" if views is not None else "views n/a"
+                print(f"### #{pid} ({views_str}) — {p['link']}")
+                snippet = _text_snippet(p.get("text"))
+                if snippet:
+                    print(f'"{snippet}"')
+            else:
+                # Re-shared post is outside this scrape's window; id only.
+                print(f"### #{pid}")
+            for c in chans:
+                subs = c.get("subscribers")
+                subs_str = f"{subs:,} subs" if subs is not None else "subs n/a"
+                name = c.get("name") or c["link"]
+                print(f"- {name} ({subs_str}) — {c['link']}")
+            print()
 
     # Our posts that forward/cite another channel — one row per post, newest
     # first. Source channel name/subs joined from `channels`.
     cited_posts = [p for p in posts if p.get("forwarder_from_channel")]
     if cited_posts:
         by_link = {c["link"]: c for c in channels}
-        print("\n## Cited Posts\n")
+        print("\n## Reposts (not original content)\n")
+        print("| Post | Snippet | Source |")
+        print("|------|---------|--------|")
         for p in sorted(cited_posts, key=lambda p: p["id"], reverse=True):
             link = p["forwarder_from_channel"]
             info = by_link.get(link, {})
@@ -952,9 +969,8 @@ def summarize_scrape(
             subs = info.get("subscribers")
             subs_str = f"{subs:,} subs" if subs else "subs n/a"
             print(
-                f"- #{p['id']} | {p['link']} | "
-                f"{_text_snippet(p.get('text'))} | "
-                f"source: {name} ({subs_str}) - {link}"
+                f"| {p['link']} | {_md_cell(p.get('text'))} "
+                f"| {name} ({subs_str}) {link} |"
             )
 
 
@@ -1179,6 +1195,160 @@ def summarize_subscribers(
         grand = sum(source_totals.values()) or 1
         for source, value in source_totals.most_common():
             print(f"- {source}: {int(value):,} ({value / grand * 100:.1f}%)")
+
+
+async def fetch_scheduled(channel: str, session_file: str) -> None:
+    """List the channel's scheduled (not-yet-published) posts.
+
+    Calls messages.GetScheduledHistory directly rather than
+    `iter_messages(..., scheduled=True)`: the iterator assumes the normal
+    newest-first (descending-id) order and stops after the first message once
+    ids start increasing, but scheduled history comes back oldest-first, so the
+    iterator only ever yields one post. The raw request returns the whole queue
+    in one round-trip. It only returns rows to an account with post rights on
+    the channel. Scheduled posts carry no views/forwards/reactions and their
+    ids are *scheduled-message* ids (distinct from the id a post gets once
+    published), so we don't persist them — this is a read-only peek."""
+    client = make_client(session_file)
+    await client.start(phone=PHONE)
+
+    try:
+        channel_entity = await client.get_entity(channel)
+        log.info("authenticated, listing scheduled posts for %s", channel)
+        try:
+            result = await client(
+                GetScheduledHistoryRequest(peer=channel_entity, hash=0)
+            )
+        except Exception as e:
+            log.error(
+                "failed to list scheduled posts (%s) - you need post rights on "
+                "the channel to see its scheduled queue",
+                e,
+            )
+            raise typer.Exit(code=1)
+        raw: list[Message] = [
+            m for m in getattr(result, "messages", []) if isinstance(m, Message)
+        ]
+    finally:
+        await client.disconnect()
+
+    # Group albums by grouped_id so a multi-photo scheduled post counts once.
+    groups: dict[int, list[Message]] = {}
+    standalone: list[Message] = []
+    for msg in raw:
+        if msg.grouped_id:
+            groups.setdefault(msg.grouped_id, []).append(msg)
+        else:
+            standalone.append(msg)
+
+    items: list[dict] = []
+    for group in (*([m] for m in standalone), *groups.values()):
+        group.sort(key=lambda m: m.id)
+        # Raw messages from GetScheduledHistory aren't client-bound, so the
+        # `.text` property is None; the plain body lives in `.message`.
+        parent = next((m for m in group if m.message), group[0])
+        attachments = [d for m in group if m.media is not None if (d := _media_desc(m))]
+        text = parent.message or ""
+        items.append(
+            {
+                "id": parent.id,
+                "date": parent.date.isoformat() if parent.date else None,
+                "text": text,
+                "attachments": attachments,
+            }
+        )
+    items.sort(key=lambda i: (i["date"] or "", i["id"]))
+
+    summarize_scheduled(channel, items)
+
+
+def _media_desc(msg: Message) -> str | None:
+    """Human-readable one-liner for a scheduled post's attachment."""
+    mt = media_type(msg)
+    if mt is None:
+        return None
+    if isinstance(msg.media, MessageMediaDocument):
+        doc = msg.media.document
+        name = next(
+            (
+                fn
+                for attr in getattr(doc, "attributes", [])
+                if (fn := getattr(attr, "file_name", None))
+            ),
+            None,
+        )
+        size = getattr(doc, "size", None)
+        mime = getattr(doc, "mime_type", None)
+        parts = [name or mime or "document"]
+        if size:
+            parts.append(f"({size:,} bytes)")
+        return " ".join(parts)
+    return mt
+
+
+def _rel_when(iso: str | None, now: datetime) -> str:
+    """Coarse, agent-friendly delta from `now`, e.g. 'in ~3h' / 'overdue 10m'."""
+    if not iso:
+        return "no date"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return "unknown"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    secs = (dt - now).total_seconds()
+    overdue = secs < 0
+    secs = abs(secs)
+    if secs < 3600:
+        mag = f"{int(secs // 60)}m"
+    elif secs < 86400:
+        mag = f"{int(secs // 3600)}h"
+    else:
+        mag = f"{int(secs // 86400)}d"
+    return f"overdue {mag}" if overdue else f"in ~{mag}"
+
+
+def summarize_scheduled(channel: str, items: list[dict]) -> None:
+    """Print the scheduled-post queue to stdout, one block per post."""
+    print(f"\n# Scheduled posts: {channel}\n")
+    if not items:
+        print("No scheduled posts in the queue.")
+        return
+
+    now = datetime.now(UTC)
+    dates = [i["date"] for i in items if i.get("date")]
+    print("## Overview\n")
+    print(f"- Queued posts: {len(items)}")
+    if dates:
+        lo = dates[0][:16].replace("T", " ")
+        hi = dates[-1][:16].replace("T", " ")
+        print(f"- Window: {lo} → {hi} UTC")
+    print("- Times are UTC. Scheduled posts have no engagement metrics yet.")
+    print(
+        "- `sched-msg #` is the scheduled-message id, distinct from the id the "
+        "post gets once published.\n"
+    )
+
+    print("## Queue\n")
+    for n, i in enumerate(items, 1):
+        when = (i.get("date") or "")[:16].replace("T", " ") or "no date"
+        rel = _rel_when(i.get("date"), now)
+        print(f"### {n}. {when} UTC ({rel}) — sched-msg #{i['id']}\n")
+        body = (i.get("text") or "").strip()
+        if body:
+            print("Text:")
+            for line in body.splitlines():
+                print(f"> {line}")
+        else:
+            print("Text: (none)")
+        attachments = i.get("attachments") or []
+        if attachments:
+            print("\nAttachments:")
+            for a in attachments:
+                print(f"- {a}")
+        else:
+            print("\nAttachments: (none)")
+        print()
 
 
 async def fetch_views_by_hour(channel: str, session_file: str) -> None:
@@ -1421,6 +1591,27 @@ def views(
     """Print views per hour of day to the console: hour|views."""
     _require_session(session_file)
     asyncio.run(fetch_views_by_hour(channel, session_file))
+
+
+@app.command("scheduled")
+def scheduled(
+    channel: Annotated[
+        str,
+        typer.Option(
+            help="Telegram channel username, required (you need post rights)."
+        ),
+    ],
+    session_file: Annotated[
+        str, typer.Option(help="Telethon session file name.")
+    ] = str(DEFAULT_SESSION_FILE),
+) -> None:
+    """List the channel's scheduled (not-yet-published) posts to the console.
+
+    Read-only — scheduled posts have no engagement yet and their ids differ
+    from published ids, so nothing is persisted. Requires post rights on the
+    channel."""
+    _require_session(session_file)
+    asyncio.run(fetch_scheduled(channel, session_file))
 
 
 @app.command("login")

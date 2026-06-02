@@ -65,7 +65,7 @@ The script then dials each DC as `<dc-ip>.<suffix>` (e.g. `149.154.167.51.nip.io
 Two CLIs under `skills/tg-analytic-skill/scripts/`:
 
 - **`tg_scrape.py`** - talks to Telegram. Commands: `scrape`, `fetch`,
-  `subscribers`, `views`.
+  `subscribers`, `views`, `scheduled`.
 - **`tg_query.py`** - read-only SQL against the per-channel SQLite DB at
   `.tg-analytic/<channel>.db` (leading `@` stripped from filename).
 
@@ -164,6 +164,22 @@ Hours are in the **Telegram account's local timezone**, not UTC - that's what
 the stats API returns and there's no offset to convert from. When reporting
 peak hours to the user, say e.g. "20:00 local time (channel admin's tz)" so
 they don't misread it as UTC.
+
+### `scheduled` - upcoming (not-yet-published) posts
+
+```
+uv run skills/tg-analytic-skill/scripts/tg_scrape.py scheduled --channel @name
+```
+
+Lists the channel's **scheduled** posts — ones queued to publish in the future —
+soonest-first. An `## Overview` (count + UTC window) followed by a numbered
+`## Queue`; each entry heads with the scheduled time, a relative delta
+(`in ~17h` / `overdue 10m`), and the `sched-msg #` id, then blockquotes the full
+post text and lists attachments (photo, or document name + size) under labeled
+`Text:` / `Attachments:` sections. Requires the account to have **post rights**
+on the channel; otherwise it logs a clear error and exits 1. Console output only
+— scheduled posts carry no engagement metrics yet and their `sched-msg` ids
+differ from the id a post gets once published, so nothing is persisted to the DB.
 
 ### `query` - ad-hoc SQL
 

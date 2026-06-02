@@ -34,6 +34,7 @@ drives. Distributed via the `skills` npm CLI (`npx skills@latest add ...`).
 | `fetch <ids>` | refresh specific post ids (one round-trip, no scan) | session |
 | `subscribers` | growth/churn by source from stats API | **admin** + ~500+ subs |
 | `views` | views per hour of day | **admin** + stats-eligible |
+| `scheduled` | list not-yet-published posts (console-only, no DB) | **post rights** |
 
 Scrape selection flags are mutually exclusive; default to `--latest N`
 (newest-first), never bare `--limit N` (walks oldest-first from msg 1).
