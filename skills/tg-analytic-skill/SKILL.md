@@ -13,6 +13,7 @@ compatibility: >-
   first run) and outbound network access to Telegram's API. Needs Telegram API
   credentials (api_id/api_hash/phone) in .tg-analytic/.env and a session file
   from a one-time interactive `login` that requires a TTY for the SMS code.
+license: Apache-2.0
 metadata:
   author: Lancetnik
   version: "1.0"
