@@ -8,6 +8,14 @@ description: >-
   performance. Do not use for one-off reads of a single message, for private
   chats the logged-in account doesn't admin.
   Runs the bundled tg_scrape.py CLI.
+compatibility: >-
+  Requires Python >=3.10 with uv (PEP-723 inline deps install on
+  first run) and outbound network access to Telegram's API. Needs Telegram API
+  credentials (api_id/api_hash/phone) in .tg-analytic/.env and a session file
+  from a one-time interactive `login` that requires a TTY for the SMS code.
+metadata:
+  author: Lancetnik
+  version: "1.0"
 ---
 
 # Telegram channel analysis
