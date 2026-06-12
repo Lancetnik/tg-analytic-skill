@@ -1,5 +1,10 @@
 # Group analytics is self-contained; post_comments stays the channel-scrape view
 
+> **Partially superseded by
+> [ADR 0002](0002-comments-live-in-group-messages.md):** comment storage
+> merged into `group_messages`; the fetch-path separation below still
+> stands.
+
 The `group` command stores **every** non-service message of a discussion group
 in `group_messages` — including comments that `scrape` already captures in
 `post_comments`. The duplication is deliberate, not a bug: `post_comments` has
