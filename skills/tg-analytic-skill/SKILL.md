@@ -206,6 +206,10 @@ LLM-generated SQL). Output is a Markdown table. `--limit N` caps rows (default
 100, `0` = unlimited). `--no-truncate` to see full cell content (post body,
 long comments). Use whenever the user asks for data not in the stdout summary.
 
+If a query fails with `no such column` / `no such table`, the error output
+lists every table with its actual columns — rewrite the query from that
+listing instead of guessing again.
+
 
 ## Validation
 

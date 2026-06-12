@@ -187,6 +187,9 @@ CREATE TABLE IF NOT EXISTS post_comments (
     user_id          INTEGER,
     user_name        TEXT,
     user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
     PRIMARY KEY (post_id, id)
 );
 
@@ -228,11 +231,32 @@ def db_path_for(output_dir: Path, channel: str) -> Path:
     return output_dir / f"{safe}.db"
 
 
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Back-fill columns added to SCHEMA after a DB file was created.
+
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so new columns
+    must be ALTERed in here. Idempotent: each ALTER runs only when its column
+    is absent. `author` is a generated VIRTUAL column (computed on read, no row
+    rewrite) — single human-readable commenter identity so LLM-generated SQL
+    can say `GROUP BY author` without knowing the user_* split. Needs SQLite
+    >= 3.31 (2020); CPython 3.10+ bundles newer. table_xinfo, not table_info:
+    only the former lists generated columns, and missing `author` here would
+    re-ALTER it on every open."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_xinfo(post_comments)")}
+    if "author" not in cols:
+        conn.execute(
+            "ALTER TABLE post_comments ADD COLUMN author TEXT GENERATED ALWAYS AS "
+            "(COALESCE(user_username, user_name, CAST(user_id AS TEXT))) VIRTUAL"
+        )
+        conn.commit()
+
+
 def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
     output_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path_for(output_dir, channel))
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     return conn
 
 

@@ -49,6 +49,9 @@ CREATE TABLE post_comments (
     user_id          INTEGER,
     user_name        TEXT,
     user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
     PRIMARY KEY (post_id, id)
 );
 
@@ -175,6 +178,9 @@ CREATE TABLE post_comments (
     user_id          INTEGER,
     user_name        TEXT,
     user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
     PRIMARY KEY (post_id, id)
 );
 ```
@@ -184,6 +190,7 @@ CREATE TABLE post_comments (
 - `user_id` — Telegram id of the commenter. When a comment was posted *as a channel* (Telegram's "send as" feature), this is the channel's id and `user_name`/`user_username` carry the channel's title/username.
 - `user_username` — without the leading `@`; NULL if the commenter has no public username.
 - `user_name` — display name; may be NULL or anonymized.
+- `author` — derived convenience identity: best available human-readable name for the commenter (`user_username`, else `user_name`, else `user_id` as text). Generated VIRTUAL column — computed on read, never stored or written. Use it for `GROUP BY author` / `COUNT(DISTINCT author)`. Caveat: two username-less commenters sharing a display name collapse into one `author` value; use `user_id` when exactness matters.
 
 ## `public_channels`
 

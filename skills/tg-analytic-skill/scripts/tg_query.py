@@ -63,6 +63,24 @@ def db_path_for(output_dir: Path, channel: str) -> Path:
     return output_dir / f"{safe}.db"
 
 
+def _schema_listing(conn: sqlite3.Connection) -> str:
+    """Compact one-line-per-table schema dump, printed on 'no such column/table'
+    errors so a caller (typically an LLM) can fix its query in one retry instead
+    of guessing names."""
+    lines = ["Available tables/columns:"]
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()
+    for (table,) in tables:
+        # table_xinfo, not table_info: only the former lists generated columns
+        # (post_comments.author), which are exactly what a retry should use.
+        cols = [row[1] for row in conn.execute(f"PRAGMA table_xinfo({table})")]
+        lines.append(f"  {table}({', '.join(cols)})")
+    lines.append("Full docs: references/schema.md")
+    return "\n".join(lines)
+
+
 def _format_cell(value, truncate: bool = True) -> str:
     if value is None:
         return ""
@@ -94,6 +112,8 @@ def query(sql: str, channel: str, output_dir: Path, limit: int, no_truncate: boo
             cursor = conn.execute(sql)
         except sqlite3.DatabaseError as e:
             log.error("query failed: %s", e)
+            if "no such column" in str(e) or "no such table" in str(e):
+                print(_schema_listing(conn), file=sys.stderr)
             return 1
         columns = [d[0] for d in cursor.description or []]
         rows = cursor.fetchall()
