@@ -117,7 +117,3 @@ skills/
       tg_query.py     Stdlib-only read-only SQL CLI.
     data/             Empty placeholder; user-specific DBs live here at runtime.
 ```
-
-## License
-
-[Apache License 2.0](./LICENSE).
