@@ -280,3 +280,130 @@ def summarize_views(
     print("\n## All hours\n")
     for hour, value in sorted(pairs):
         print(f"- {hour:02d}:00 | {int(value):,} views ({value / total * 100:.1f}%)")
+
+
+def _local_hour(iso: str | None) -> int | None:
+    """Hour-of-day in the machine's local timezone (stored dates are UTC)."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone().hour
+
+
+def _local_tz_label() -> str:
+    """e.g. 'UTC+03:00' — labels the hour table so it's not misread as UTC."""
+    offset = datetime.now(UTC).astimezone().strftime("%z")
+    return f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC"
+
+
+def _via_breakdown(events: list[dict], kind: str) -> str:
+    counts = Counter(e.get("via") or "?" for e in events if e["kind"] == kind)
+    total = sum(counts.values())
+    if not total:
+        return f"{total}"
+    detail = ", ".join(f"{via} {n}" for via, n in counts.most_common())
+    return f"{total} ({detail})"
+
+
+def summarize_group(
+    label: str,
+    overview: dict,
+    messages: list[dict],
+    events: list[dict],
+    threads: list[dict],
+) -> None:
+    """Print an LLM-oriented summary of a discussion-group scan to stdout.
+
+    `messages` includes thread roots (is_thread_root=1); every engagement
+    figure below excludes them — roots carry the channel post's reactions.
+    """
+    print(f"\n# Group summary: {label}\n")
+    if not messages and not events:
+        print("No group messages or events in the scanned window.")
+        return
+
+    own = [m for m in messages if not m.get("is_thread_root")]
+    in_threads = [m for m in own if m.get("thread_post_id") is not None]
+    chatter = [m for m in own if m.get("thread_post_id") is None]
+    joins = [e for e in events if e["kind"] == "join"]
+    leaves = [e for e in events if e["kind"] == "leave"]
+
+    print("## Overview\n")
+    members = overview.get("members")
+    members_str = f" — {members:,} members" if members is not None else ""
+    print(f"- Group: {overview.get('title') or label} ({overview.get('link')}){members_str}")
+    dates = sorted(d for m in own for d in [m.get("date")] if d)
+    if dates:
+        print(f"- Window: {dates[0][:10]} → {dates[-1][:10]}"
+              f"  (group-msg ids {overview.get('id_range')})")
+    print(f"- Messages: {len(own)} ({len(in_threads)} in threads, "
+          f"{len(chatter)} top-level chatter)")
+    print(f"- Joins: {_via_breakdown(events, 'join')}  |  "
+          f"Leaves: {_via_breakdown(events, 'leave')}  |  "
+          f"net {len(joins) - len(leaves):+d}")
+    if overview.get("standalone"):
+        print("- Standalone group: no linked channel, so no threads.")
+
+    by_day: dict[str, Counter] = {}
+    for e in events:
+        day = (e.get("date") or "")[:10]
+        if day:
+            by_day.setdefault(day, Counter())[e["kind"]] += 1
+    if by_day:
+        print("\n## Joins & leaves by day\n")
+        print("| Day | Joins | Leaves |")
+        print("|-----|------:|-------:|")
+        for day in sorted(by_day):
+            c = by_day[day]
+            print(f"| {day} | {c['join']} | {c['leave']} |")
+
+    # Hour-of-day profile: all days aggregated, machine-local tz. Three
+    # aligned signals so spikes can be compared at a glance.
+    joins_h: Counter = Counter()
+    msgs_h: Counter = Counter()
+    authors_h: dict[int, set] = {}
+    for e in joins:
+        if (h := _local_hour(e.get("date"))) is not None:
+            joins_h[h] += 1
+    for m in own:
+        if (h := _local_hour(m.get("date"))) is not None:
+            msgs_h[h] += 1
+            authors_h.setdefault(h, set()).add(m.get("author"))
+    print(f"\n## Activity by hour of day ({_local_tz_label()}, machine-local)\n")
+    print("| Hour | Joins | Messages | Uniq authors |")
+    print("|------|------:|---------:|-------------:|")
+    for h in range(24):
+        print(f"| {h:02d}:00 | {joins_h[h]} | {msgs_h[h]} "
+              f"| {len(authors_h.get(h, ()))} |")
+
+    if threads and not overview.get("standalone"):
+        print(f"\n## Threads in window ({len(threads)})\n")
+        print("| Post | Replies | Commenters | First reply | Snippet |")
+        print("|------|--------:|-----------:|-------------|---------|")
+        for t in sorted(threads, key=lambda t: t["replies"], reverse=True):
+            first = t.get("first_reply_minutes")
+            first_str = f"{first:.0f}m" if first is not None else "—"
+            print(f"| {t['post_link'] or t['post_id']} | {t['replies']} "
+                  f"| {t['commenters']} | {first_str} | {_md_cell(t.get('snippet'))} |")
+
+    if own:
+        print("\n## Engagement\n")
+        per_author: Counter = Counter(m.get("author") for m in own)
+        reacts: Counter = Counter()
+        for m in own:
+            reacts[m.get("author")] += m.get("reactions") or 0
+        print("| Author | Messages | Reactions received |")
+        print("|--------|---------:|-------------------:|")
+        for author, n in per_author.most_common(10):
+            print(f"| {author} | {n} | {reacts[author]} |")
+        days = len({(m.get("date") or "")[:10] for m in own if m.get("date")}) or 1
+        print(f"\n- Avg messages/day: {len(own) / days:.1f}")
+        top = max(own, key=lambda m: m.get("reactions") or 0)
+        if top.get("reactions"):
+            print(f"- Most-reacted message: {top['reactions']} reactions — "
+                  f"{top.get('author')}: \"{_md_cell(top.get('text'))}\"")
