@@ -1137,6 +1137,13 @@ def upsert_group_events(
     events: list[GroupEvent],
     users: dict[int, tuple[str | None, str | None]],
 ) -> None:
+    # SQLite treats NULLs in a composite PK as distinct, so ON CONFLICT
+    # can't dedupe the rare events whose user_id is unknown — pre-delete
+    # them for the incoming ids to keep re-scans idempotent.
+    conn.executemany(
+        "DELETE FROM group_events WHERE id = ? AND user_id IS NULL",
+        [(e.id,) for e in events if e.user_id is None],
+    )
     conn.executemany(
         """
         INSERT INTO group_events (
@@ -1271,7 +1278,6 @@ async def scan_group(
     --latest newest-first flip, same inclusive --offset-id)."""
     scrape_date = datetime.now(UTC).isoformat()
     handle = channel or group
-    label = channel or group
 
     if latest is not None:
         reverse, iter_limit = False, latest
@@ -1287,7 +1293,7 @@ async def scan_group(
             target = await resolve_group_target(client, channel, group)
             log.info(
                 "authenticated, scanning group %s (%s)",
-                target.title or target.link, label,
+                target.title or target.link, handle,
             )
             raw = [
                 m
@@ -1303,6 +1309,11 @@ async def scan_group(
 
             service = [m for m in raw if isinstance(m, MessageService)]
             ordinary = [m for m in raw if isinstance(m, Message)]
+            # Snapshot the window NOW: back-fetched out-of-window roots get
+            # appended to `ordinary` below, and their (much older) ids would
+            # otherwise drag `lo` down — making the thread-stats query and
+            # the reported id_range cover prior scans' rows, not this one's.
+            scanned_ids = [m.id for m in raw]
 
             events = [e for m in service for e in classify_service_message(m)]
             users = await _resolve_event_users(client, events)
@@ -1338,8 +1349,9 @@ async def scan_group(
                 len(rows), len(events), db_path_for(output_dir, handle),
             )
 
-        ids = [m.id for m in ordinary] + [e.id for e in events]
-        lo, hi = (min(ids), max(ids)) if ids else (0, 0)
+        lo, hi = (
+            (min(scanned_ids), max(scanned_ids)) if scanned_ids else (0, 0)
+        )
         threads = (
             _load_thread_stats(conn, lo, hi)
             if target.channel_id is not None
@@ -1353,7 +1365,7 @@ async def scan_group(
         "link": target.link,
         "members": target.members,
         "standalone": target.channel_id is None,
-        "id_range": f"{lo}..{hi}" if ids else "—",
+        "id_range": f"{lo}..{hi}" if scanned_ids else "—",
     }
     messages = [
         {
@@ -1373,7 +1385,7 @@ async def scan_group(
         }
         for e in events
     ]
-    summarize_group(label, overview, messages, event_dicts, threads)
+    summarize_group(handle, overview, messages, event_dicts, threads)
 
 
 # ---------------------------------------------------------------------------
