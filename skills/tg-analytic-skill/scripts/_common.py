@@ -54,20 +54,6 @@ CREATE TABLE IF NOT EXISTS post_metrics (
 CREATE INDEX IF NOT EXISTS idx_post_metrics_post
     ON post_metrics(post_id);
 
-CREATE TABLE IF NOT EXISTS post_comments (
-    post_id          INTEGER NOT NULL,
-    id               INTEGER NOT NULL,
-    date             TEXT,
-    text             TEXT,
-    user_id          INTEGER,
-    user_name        TEXT,
-    user_username    TEXT,
-    author           TEXT GENERATED ALWAYS AS (
-        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
-    ) VIRTUAL,
-    PRIMARY KEY (post_id, id)
-);
-
 CREATE TABLE IF NOT EXISTS public_channels (
     link         TEXT PRIMARY KEY,
     name         TEXT,
@@ -148,24 +134,14 @@ def db_path_for(output_dir: Path, channel: str) -> Path:
     return output_dir / f"{safe}.db"
 
 
-def _add_missing_columns(conn: sqlite3.Connection) -> None:
-    """Back-fill columns added to SCHEMA after a DB file was created.
+def _drop_legacy_tables(conn: sqlite3.Connection) -> None:
+    """Self-heal DB files created before the post_comments merge.
 
-    CREATE TABLE IF NOT EXISTS never alters an existing table, so new columns
-    must be ALTERed in here. Idempotent: each ALTER runs only when its column
-    is absent. `author` is a generated VIRTUAL column (computed on read, no row
-    rewrite) — single human-readable commenter identity so LLM-generated SQL
-    can say `GROUP BY author` without knowing the user_* split. Needs SQLite
-    >= 3.31 (2020); CPython 3.10+ bundles newer. table_xinfo, not table_info:
-    only the former lists generated columns, and missing `author` here would
-    re-ALTER it on every open."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_xinfo(post_comments)")}
-    if "author" not in cols:
-        conn.execute(
-            "ALTER TABLE post_comments ADD COLUMN author TEXT GENERATED ALWAYS AS "
-            "(COALESCE(user_username, user_name, CAST(user_id AS TEXT))) VIRTUAL"
-        )
-        conn.commit()
+    Comments live in group_messages since ADR 0002 — scrape writes
+    full-fidelity rows there. The old table is dropped rather than
+    migrated; comment data reappears on the next scrape run."""
+    conn.execute("DROP TABLE IF EXISTS post_comments")
+    conn.commit()
 
 
 def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
@@ -173,5 +149,5 @@ def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path_for(output_dir, channel))
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
-    _add_missing_columns(conn)
+    _drop_legacy_tables(conn)
     return conn

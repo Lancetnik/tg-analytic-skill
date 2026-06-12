@@ -41,20 +41,6 @@ CREATE TABLE post_metrics (
 );
 CREATE INDEX idx_post_metrics_post ON post_metrics(post_id);
 
-CREATE TABLE post_comments (
-    post_id          INTEGER NOT NULL,
-    id               INTEGER NOT NULL,
-    date             TEXT,
-    text             TEXT,
-    user_id          INTEGER,
-    user_name        TEXT,
-    user_username    TEXT,
-    author           TEXT GENERATED ALWAYS AS (
-        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
-    ) VIRTUAL,
-    PRIMARY KEY (post_id, id)
-);
-
 CREATE TABLE public_channels (
     link         TEXT PRIMARY KEY,
     name         TEXT,
@@ -126,7 +112,7 @@ CREATE TABLE group_metrics (
 );
 ```
 
-Date/time columns are ISO-8601 strings throughout (`posts.date`, `posts.edit_date`, `post_comments.date`, `public_channels.last_seen`, `public_shares.first_seen`, `post_metrics.scrape_date`, `group_messages.date`, `group_events.date`, `group_metrics.scrape_date`). Use SQLite's `date()`, `datetime()`, `strftime()` directly — no conversion needed.
+Date/time columns are ISO-8601 strings throughout (`posts.date`, `posts.edit_date`, `public_channels.last_seen`, `public_shares.first_seen`, `post_metrics.scrape_date`, `group_messages.date`, `group_events.date`, `group_metrics.scrape_date`). Use SQLite's `date()`, `datetime()`, `strftime()` directly — no conversion needed.
 
 ## Repost direction cheat-sheet
 
@@ -218,31 +204,6 @@ JOIN post_metrics m ON m.id IN (SELECT id FROM latest) AND m.post_id = p.id;
 
 For engagement over time on a single post: `SELECT scrape_date, views, reactions FROM post_metrics WHERE post_id = ? ORDER BY id`.
 
-## `post_comments`
-
-```sql
-CREATE TABLE post_comments (
-    post_id          INTEGER NOT NULL,
-    id               INTEGER NOT NULL,
-    date             TEXT,
-    text             TEXT,
-    user_id          INTEGER,
-    user_name        TEXT,
-    user_username    TEXT,
-    author           TEXT GENERATED ALWAYS AS (
-        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
-    ) VIRTUAL,
-    PRIMARY KEY (post_id, id)
-);
-```
-
-- `post_id` — FK to `posts.id`.
-- `id` — comment message id in the linked discussion group. Unique only within `post_id`.
-- `user_id` — Telegram id of the commenter. When a comment was posted *as a channel* (Telegram's "send as" feature), this is the channel's id and `user_name`/`user_username` carry the channel's title/username.
-- `user_username` — without the leading `@`; NULL if the commenter has no public username.
-- `user_name` — display name; may be NULL or anonymized.
-- `author` — derived convenience identity: best available human-readable name for the commenter (`user_username`, else `user_name`, else `user_id` as text). Generated VIRTUAL column — computed on read, never stored or written. Use it for `GROUP BY author` / `COUNT(DISTINCT author)`. Caveat: two username-less commenters sharing a display name collapse into one `author` value; use `user_id` when exactness matters.
-
 ## `public_channels`
 
 ```sql
@@ -308,12 +269,14 @@ CREATE TABLE subscriber_sources (
 - `source` — Telegram-supplied label. Observed values: `URL`, `Search`, `Groups`, `Channels`, `Other`. Don't assume the set is closed.
 - `joins` — new subscribers from this source on this date. Sum across all sources for a given `date` equals (or closely approximates) `subscribers.joins` for the same date.
 
-## `group_messages` — the discussion group, self-contained
+## `group_messages` — comments and the discussion group, self-contained
 
-Written by the `group` command. **Deliberately overlaps `post_comments`**
-(see ADR-0001): comment counts per post → `post_comments`; thread
-structure, reactions, per-user engagement → here. Don't count comments
-from both.
+The **only** comment store (ADR-0002). Written by both commands:
+`scrape`/`fetch` replace each scraped post's comment thread (so comments
+deleted on Telegram disappear on re-scrape); `group` upserts everything
+its scan window covers, top-level chatter and thread roots included.
+Per-post comment counts come from here too — see *Thread stats per post*
+under Common joins.
 
 ```sql
 CREATE TABLE group_messages (
@@ -345,7 +308,15 @@ CREATE TABLE group_messages (
   roots carry the channel post's reactions and would double-count.
 - `reactions` — reaction count at last scan (upserted in place, not a
   time series; paid stars folded in).
-- `author` — same generated convenience identity as `post_comments`.
+- `user_id` — Telegram id of the sender. When a message was posted *as a
+  channel* (Telegram's "send as" feature), this is the channel's id and
+  `user_name`/`user_username` carry the channel's title/username.
+- `author` — derived convenience identity: best available human-readable
+  name (`user_username`, else `user_name`, else `user_id` as text).
+  Generated VIRTUAL column — computed on read, never stored or written.
+  Use it for `GROUP BY author` / `COUNT(DISTINCT author)`. Caveat: two
+  username-less users sharing a display name collapse into one `author`
+  value; use `user_id` when exactness matters.
 
 ## `group_events` — joins & leaves
 
