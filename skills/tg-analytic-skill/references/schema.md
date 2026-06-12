@@ -445,8 +445,11 @@ FROM group_events e, posts p
 WHERE p.id = :post_id
   AND e.kind = 'join'
   AND e.date >= p.date
-  AND e.date < datetime(p.date, '+7 days');
+  AND datetime(e.date) < datetime(p.date, '+7 days');
 ```
+
+(`datetime(e.date)` normalizes the stored `T`-separated ISO string to
+SQLite's space-separated form so the boundary-day comparison is exact.)
 
 Thread stats per post (engagement excludes roots — always):
 
