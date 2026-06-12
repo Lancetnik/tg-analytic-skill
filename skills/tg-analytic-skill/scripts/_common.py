@@ -97,6 +97,48 @@ CREATE TABLE IF NOT EXISTS subscriber_sources (
     joins    INTEGER,
     PRIMARY KEY (date, source)
 );
+
+CREATE TABLE IF NOT EXISTS group_messages (
+    id               INTEGER PRIMARY KEY,
+    date             TEXT,
+    text             TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    reply_to_msg_id  INTEGER,
+    thread_post_id   INTEGER,
+    is_thread_root   INTEGER NOT NULL DEFAULT 0,
+    reactions        INTEGER,
+    media_type       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_messages_thread
+    ON group_messages(thread_post_id);
+
+CREATE TABLE IF NOT EXISTS group_events (
+    id             INTEGER NOT NULL,
+    date           TEXT,
+    kind           TEXT,
+    via            TEXT,
+    user_id        INTEGER,
+    user_name      TEXT,
+    user_username  TEXT,
+    author         TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    PRIMARY KEY (id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS group_metrics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scrape_date  TEXT NOT NULL,
+    group_link   TEXT,
+    group_title  TEXT,
+    members      INTEGER
+);
 """
 
 
