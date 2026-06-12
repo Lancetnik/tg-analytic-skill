@@ -920,8 +920,8 @@ def summarize_scrape(
     print(f"- Posts: {n}{span}")
     print(f"- Views: {views:,}  (avg {views // n:,}/post)")
     print(f"- Reactions: {reactions:,}   Comments: {comments:,}   "
-          f"Forwards: {forwards:,}")
-    print(f"- Re-shared by: {len(forwarders)} channels")
+          f"Forwards of your posts: {forwards:,}")
+    print(f"- Your posts re-shared by: {len(forwarders)} other channels")
 
     # One combined ranking, sorted by views, with reactions alongside - half
     # the lines of two separate tables and both signals visible at once.
@@ -945,14 +945,18 @@ def summarize_scrape(
             for pid in c["shared_posts"]:
                 shares_by_post.setdefault(pid, []).append(c)
         total_shares = sum(len(chs) for chs in shares_by_post.values())
+        # Direction matters and gets confused easily: this section is OTHERS
+        # re-sharing US. The opposite direction (our channel reposting others)
+        # is the "YOUR reposts" section below. Spell it out in the headings.
         print(
-            f"\n## Forwarded posts "
+            f"\n## Who re-shared YOUR posts "
             f"({len(shares_by_post)} of your posts re-shared, "
-            f"{total_shares} shares by {len(forwarders)} channels)\n"
+            f"{total_shares} shares by {len(forwarders)} other channels)\n"
         )
         print(
+            "Direction: OTHER channels forwarded YOUR content (your reach). "
             "Each of your posts below was re-shared by the listed channels. "
-            "`subs` is each channel's size (the reach that share reached).\n"
+            "`subs` is each channel's size (the audience that share reached).\n"
         )
         for pid in sorted(shares_by_post, reverse=True):
             chans = sorted(
@@ -983,9 +987,13 @@ def summarize_scrape(
     cited_posts = [p for p in posts if p.get("forwarder_from_channel")]
     if cited_posts:
         by_link = {c["link"]: c for c in channels}
-        print("\n## Reposts (not original content)\n")
-        print("| Post | Snippet | Source |")
-        print("|------|---------|--------|")
+        print("\n## YOUR reposts of OTHER channels (not your original content)\n")
+        print(
+            "Direction: YOUR channel forwarded SOMEONE ELSE's content — the "
+            "opposite of the re-shares section above.\n"
+        )
+        print("| Post | Snippet | Reposted from |")
+        print("|------|---------|---------------|")
         for p in sorted(cited_posts, key=lambda p: p["id"], reverse=True):
             link = p["forwarder_from_channel"]
             info = by_link.get(link, {})

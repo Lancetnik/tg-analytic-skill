@@ -40,6 +40,18 @@ Every command prints a Markdown summary block to stdout. Use it as-is:
 Don't paraphrase the summary; the script already pre-computes the
 most-asked questions.
 
+**Repost direction — easy to mix up, get it right:**
+
+- "Who re-shared YOUR posts" (scrape summary section) = OTHER channels
+  forwarded the user's content — this is the user's *reach*. SQL:
+  `public_shares` / `post_metrics.public_forwards_count`.
+- "YOUR reposts of OTHER channels" (scrape summary section) = the user's
+  channel forwarded SOMEONE ELSE's content — *not original content*. SQL:
+  `posts.forwarder_from_channel IS NOT NULL`.
+
+Never present one as the other; when reporting, name the direction explicitly
+("they re-shared you" vs "you reposted them").
+
 ## First-run setup (do this before any scraping)
 
 All runtime state — credentials, Telegram session, per-channel DBs, downloaded media — lives in `.tg-analytic/` at your **project root** (the cwd you launch the script from). The skill itself is read-only. Run all commands from the project root, not from inside the skill directory.
@@ -193,8 +205,9 @@ differ from the id a post gets once published, so nothing is persisted to the DB
 ### `query` - ad-hoc SQL
 
 Read [references/schema.md](references/schema.md) before writing SQL with
-`tg_query.py`. It documents every table, primary key, and the common joins
-(latest metric per post, outward forwarders, inward citation, album items).
+`tg_query.py`. It documents every table, primary key, the repost-direction
+cheat-sheet (who re-shared you vs whom you reposted), and the common joins
+(latest metric per post, re-shares of your posts, repost sources, album items).
 
 ```
 uv run skills/tg-analytic-skill/scripts/tg_query.py --channel @name \

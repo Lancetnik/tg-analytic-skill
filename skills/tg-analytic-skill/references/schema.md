@@ -88,6 +88,17 @@ CREATE TABLE subscriber_sources (
 
 Date/time columns are ISO-8601 strings throughout (`posts.date`, `posts.edit_date`, `post_comments.date`, `public_channels.last_seen`, `public_shares.first_seen`, `post_metrics.scrape_date`). Use SQLite's `date()`, `datetime()`, `strftime()` directly — no conversion needed.
 
+## Repost direction cheat-sheet
+
+Two opposite directions live in different tables — don't mix them up:
+
+| Direction | Question it answers | Where |
+| --- | --- | --- |
+| **YOU reposted someone** | "which of my posts are forwards of other channels' content?" | `posts.forwarder_from_channel` (non-NULL = that post is not original) |
+| **Someone reposted YOU** | "which channels re-shared my posts?" (your reach) | `public_shares` (one row per re-share), count in `post_metrics.public_forwards_count` |
+
+`post_metrics.forwards` is a third thing: Telegram's raw forward counter on your post — forwards by anyone, anywhere (including private chats/users), superset of `public_forwards_count`.
+
 ## `posts`
 
 ```sql
@@ -111,7 +122,7 @@ CREATE TABLE posts (
 - `reply_to_msg_id` — non-null only if the post is a reply (rare on broadcast channels).
 - `tags` — **JSON array of hashtag strings without the `#`**, e.g. `["AI", "claude", "cursor"]`. Empty posts store `[]`. Query with `json_each(tags)` to explode, or `tags LIKE '%"AI"%'` for a quick contains check.
 - `grouped_id` — Telegram album id. Non-null means the post is part of a multi-attachment album; its members live in `post_attachments`.
-- `forwarder_from_channel` — if this post is a forward of another channel's post, the source channel link (joins `public_channels.link`); NULL otherwise. The source channel is auto-inserted into `public_channels`.
+- `forwarder_from_channel` — direction: **YOU reposted them.** If this post is a forward of another channel's post (i.e. not your original content), the source channel link (joins `public_channels.link`); NULL otherwise. The source channel is auto-inserted into `public_channels`. For the opposite direction (others reposting you) see `public_shares`.
 
 ## `post_attachments`
 
@@ -208,7 +219,9 @@ CREATE TABLE public_channels (
 - `name`, `description`, `subscribers` — populated only when the scrape ran with `--channel-info` (default on). Older rows without channel-info data have these as NULL.
 - `last_seen` — ISO-8601 timestamp of the most recent scrape that observed this channel.
 
-## `public_shares` — outbound forward map
+## `public_shares` — who re-shared YOUR posts
+
+Direction: **someone reposted YOU.** For the opposite direction (your channel reposting others) see `posts.forwarder_from_channel`.
 
 ```sql
 CREATE TABLE public_shares (
@@ -257,7 +270,7 @@ CREATE TABLE subscriber_sources (
 
 ## Common joins
 
-Outward forwarders of a post (which channels re-shared us):
+Who re-shared YOUR post (other channels that forwarded your content):
 
 ```sql
 SELECT c.link, c.name, c.subscribers
@@ -266,7 +279,7 @@ JOIN public_channels c ON s.forwarder_link = c.link
 WHERE s.post_id = ?;
 ```
 
-Inward forward source of a post (which channel we forwarded from):
+Whose post YOU reposted (the source channel your post was forwarded from):
 
 ```sql
 SELECT c.link, c.name, c.subscribers
