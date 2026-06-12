@@ -374,16 +374,6 @@ def summarize_group(
         if (h := _local_hour(m.get("date"))) is not None:
             msgs_h[h] += 1
             authors_h.setdefault(h, set()).add(m.get("author"))
-    print(f"\n## Activity by hour of day ({_local_tz_label()}, machine-local)\n")
-    print("| Hour | Joins | Messages | Uniq authors |")
-    print("|------|------:|---------:|-------------:|")
-    # All-zero hours carry no signal — skip them so the table stays as
-    # short as the activity is sparse.
-    for h in range(24):
-        if not (joins_h[h] or msgs_h[h] or authors_h.get(h)):
-            continue
-        print(f"| {h:02d}:00 | {joins_h[h]} | {msgs_h[h]} "
-              f"| {len(authors_h.get(h, ()))} |")
 
     if threads and not overview.get("standalone"):
         print(f"\n## Threads in window ({len(threads)})\n")

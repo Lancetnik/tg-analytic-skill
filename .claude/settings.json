@@ -6,6 +6,7 @@
       "mcp__codegraph__codegraph_callers",
       "mcp__codegraph__codegraph_callees",
       "mcp__codegraph__codegraph_impact",
+      "mcp__codegraph__codegraph_explore",
       "mcp__codegraph__codegraph_node",
       "mcp__codegraph__codegraph_status",
       "Bash(rtk read *)",
@@ -14,6 +15,9 @@
       "Bash(rtk git status *)",
       "Bash(rtk git diff *)",
       "Bash(rtk git log *)",
+      "Bash(rtk git show *)",
+      "Bash(rtk git diff *)",
+      "Bash(git stash list)",
       "Bash(rtk gh repo view *)",
       "Bash(head *)",
       "Bash(tail *)",
@@ -23,7 +27,7 @@
       "Bash(awk *)",
       "Bash(sed *)",
       "Bash(tr *)",
-      "Bash(uv run scripts/tg_query.py *)"
+      "Bash(uv run skills/tg-analytic-skill/scripts/tg_query.py *)"
     ]
   }
 }
