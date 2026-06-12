@@ -4,7 +4,9 @@ description: >-
   Use this skill when the user wants to analyze a Telegram channel — scrape
   posts, comments, forwards, and per-post engagement over time, or pull
   subscriber growth/churn by source and views by hour of day from Telegram's
-  stats API. Covers content, engagement, audience dynamics, and posting
+  stats API. Also scans the channel's discussion group (or any group the
+  account is in): thread engagement, join/leave events, hourly activity.
+  Covers content, engagement, audience dynamics, and posting
   performance. Do not use for one-off reads of a single message, for private
   chats the logged-in account doesn't admin.
   Runs the bundled tg_scrape.py CLI.
@@ -16,7 +18,7 @@ compatibility: >-
 license: Apache-2.0
 metadata:
   author: Lancetnik
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Telegram channel analysis
@@ -78,7 +80,7 @@ uv run <skill_dir>/scripts/tg_scrape.py login
 Two CLIs under `<skill_dir>/scripts/`:
 
 - **`tg_scrape.py`** - talks to Telegram. Commands: `scrape`, `fetch`,
-  `subscribers`, `views`, `scheduled`.
+  `group`, `subscribers`, `views`, `scheduled`.
 - **`tg_query.py`** - read-only SQL against the per-channel SQLite DB at
   `.tg-analytic/<channel>.db` (leading `@` stripped from filename).
 
@@ -149,6 +151,47 @@ uv run <skill_dir>/scripts/tg_scrape.py fetch 103 105 108 --channel @name \
 ```
 
 To pick ids worth reindexing (e.g. recent bangers), pre-query the DB and pass the ids into `fetch`.
+
+### 3. Discussion-group analytics — `group`
+
+```
+# the channel's linked discussion group (threads join to posts;
+# rows land in the CHANNEL's DB)
+uv run <skill_dir>/scripts/tg_scrape.py group --channel @name --latest 500
+
+# any standalone group the account is a member of (own DB at
+# .tg-analytic/<group>.db; no thread linkage)
+uv run <skill_dir>/scripts/tg_scrape.py group --group @name --latest 500
+```
+
+Pass **exactly one** of `--channel`/`--group`. For a group that is attached
+to a channel you analyze, always use `--channel` — `--group` treats it as
+standalone and writes to a separate DB, divorced from the channel's posts
+(the script logs a notice when it detects this).
+
+Scans group history into three tables: `group_messages` (every non-service
+message, comments included — see the overlap rule in
+[references/schema.md](references/schema.md)), `group_events` (joins/leaves
+from service messages — needs only membership, **not** admin), and an
+append-only `group_metrics` member-count snapshot per run.
+
+Selection flags are the same four as `scrape` (the table above applies:
+default to `--latest N`, never bare `--limit`). Incremental refresh:
+`--offset-id` from `MAX(id)` over `group_messages`. No media is downloaded
+from groups (`media_type` is recorded).
+
+The summary prints joins/leaves by mechanism and by day, an hour-of-day
+activity table (joins / messages / unique authors, machine-local timezone —
+labeled; don't re-report those hours as UTC), every thread touched in the
+window (replies, unique commenters, time-to-first-reply), and top
+contributors. CTA-attribution ("did post #X's invite work?") is
+deliberately NOT pre-computed — use the canonical query in
+references/schema.md with the user's chosen window.
+
+Completeness caveat: Telegram suppresses join/leave service messages in
+very large groups. The summary's event counts are what the scan *found*;
+cross-check against the `group_metrics.members` trend before claiming
+totals.
 
 ## Other commands
 
@@ -230,6 +273,13 @@ After running a command, sanity-check the result before reporting:
   window the user asked for. If empty, the channel is below Telegram's stats
   threshold.
 - After `views` — expect 24 hourly buckets in the summary. Fewer means a thin stats window; mention this to the user instead of inventing peaks.
+- After `group` — confirm rows landed:
+  ```
+  uv run <skill_dir>/scripts/tg_query.py --channel @name \
+    "SELECT (SELECT COUNT(*) FROM group_messages) msgs, (SELECT COUNT(*) FROM group_events) events"
+  ```
+  (`--channel <group>` for a standalone group's DB.) Zero messages on a
+  non-empty group means a wrong handle or no membership.
 
 ## Common errors
 
@@ -239,6 +289,8 @@ After running a command, sanity-check the result before reporting:
 | `failed to get stats ... you must be an admin of a channel that is large enough` | Account isn't admin, or channel < ~500 subs | Skill cannot do `subscribers`/`views` here. Fall back to `scrape` + `post_metrics` for engagement signals. |
 | `no followers graph available` / `no top-hours graph available` | Stats exist but the requested graph is empty | Report to user; no retry helps. |
 | New, empty `.tg-analytic/<handle>.db` appeared | Channel handle typo | Confirm the handle with the user; delete the empty DB before re-running. |
+| `... has no linked discussion group` | Channel has comments disabled / no group attached | Only `--group` mode is possible, and only for groups the account can read. |
+| `is the discussion group of a channel ... re-run with --channel` (warning, not an error) | `--group` used on an attached group | Re-run with `--channel <channel>` to get thread↔post linkage in the channel's DB. |
 
 Telethon may also surface `FloodWaitError` mid-scrape on very large channels — the script logs and continues per item where possible. If a run aborts, re-run with `--offset-id <last-seen-id>` to resume forward rather than restart.
 
