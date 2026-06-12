@@ -296,35 +296,21 @@ async def get_public_forwards(
 
 async def get_comments(
     client: TelegramClient, channel_entity, msg: Message
-) -> list[dict]:
+) -> list[Message]:
+    """One post's comment thread — group-side Message objects, sorted by id.
+
+    Sender extraction happens later in _sender_fields (shared with the
+    group scan), so this stays a plain fetch."""
     if not (msg.replies and msg.replies.replies):
         return []
-    comments = []
+    comments: list[Message] = []
     try:
         async for c in client.iter_messages(channel_entity, reply_to=msg.id):
-            if not isinstance(c, Message):
-                continue
-            sender = c.sender
-            author = {"id": None, "name": None, "username": None}
-            if sender:
-                first = getattr(sender, "first_name", "") or ""
-                last = getattr(sender, "last_name", "") or ""
-                author = {
-                    "id": sender.id,
-                    "name": (first + " " + last).strip() or None,
-                    "username": getattr(sender, "username", None),
-                }
-            comments.append(
-                {
-                    "id": c.id,
-                    "date": c.date.isoformat() if c.date else None,
-                    "text": c.text or "",
-                    "author": author,
-                }
-            )
+            if isinstance(c, Message):
+                comments.append(c)
     except Exception as e:
         log.error("msg %d: failed to fetch comments (%s)", msg.id, e)
-    comments.sort(key=lambda c: c["id"])
+    comments.sort(key=lambda c: c.id)
     if comments:
         log.debug("msg %d: %d comment(s)", msg.id, len(comments))
     return comments
@@ -451,34 +437,24 @@ def insert_metrics(
     )
 
 
-def replace_comments(
+def replace_thread_comments(
     conn: sqlite3.Connection,
     post_id: int,
-    comments: list[dict],
+    comments: list[Message],
 ) -> None:
+    """Replace one post's comment thread in group_messages.
+
+    The scoped DELETE keeps the old per-post deletion tracking (a comment
+    removed on Telegram disappears on re-scrape) without touching thread
+    roots or top-level chatter, which the group scan owns."""
     conn.execute(
-        "DELETE FROM post_comments WHERE post_id = ?",
+        "DELETE FROM group_messages"
+        " WHERE thread_post_id = ? AND is_thread_root = 0",
         (post_id,),
     )
-    conn.executemany(
-        """
-        INSERT INTO post_comments (
-            post_id, id, date, text,
-            user_id, user_name, user_username
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                post_id,
-                c["id"],
-                c["date"],
-                c["text"],
-                c["author"]["id"],
-                c["author"]["name"],
-                c["author"]["username"],
-            )
-            for c in comments
-        ],
+    upsert_group_messages(
+        conn,
+        [_message_row(m, thread_post=post_id, is_root=False) for m in comments],
     )
 
 
@@ -603,7 +579,7 @@ async def process_post(
     upsert_post(conn, channel, parent, attachments, forwarder_from_channel)
     insert_metrics(conn, parent, scrape_date, len(comments), len(fwd_data))
     if with_comments:
-        replace_comments(conn, parent.id, comments)
+        replace_thread_comments(conn, parent.id, comments)
     upsert_public_shares(conn, parent.id, fwd_data, scrape_date)
     conn.commit()
 
@@ -1101,8 +1077,8 @@ async def resolve_group_target(
 
 
 def _sender_fields(msg: Message) -> tuple[int | None, str | None, str | None]:
-    """(user_id, display name, username) for a message's sender — the same
-    extraction get_comments does, shared shape with post_comments."""
+    """(user_id, display name, username) for a message's sender — shared by
+    the group scan and the scrape-side comment path."""
     sender = msg.sender
     if sender is None:
         peer = getattr(msg, "from_id", None)
@@ -1304,13 +1280,13 @@ async def _resolve_event_users(
     return users
 
 
-def _group_message_row(msg: Message, root_map: dict[int, int]) -> tuple:
+def _message_row(
+    msg: Message, thread_post: int | None, is_root: bool
+) -> tuple:
+    """group_messages row tuple — shared by the group scan and the
+    scrape-side comment path (which knows its thread_post directly)."""
     uid, name, username = _sender_fields(msg)
     reactions, stars = count_reactions(msg)
-    is_root = msg.id in root_map
-    thread_post = (
-        root_map[msg.id] if is_root else thread_post_id_for(msg, root_map)
-    )
     return (
         msg.id,
         msg.date.isoformat() if msg.date else None,
@@ -1324,6 +1300,14 @@ def _group_message_row(msg: Message, root_map: dict[int, int]) -> tuple:
         reactions + stars,
         media_type(msg),
     )
+
+
+def _group_message_row(msg: Message, root_map: dict[int, int]) -> tuple:
+    is_root = msg.id in root_map
+    thread_post = (
+        root_map[msg.id] if is_root else thread_post_id_for(msg, root_map)
+    )
+    return _message_row(msg, thread_post, is_root)
 
 
 def _load_thread_stats(
