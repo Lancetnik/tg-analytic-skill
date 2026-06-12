@@ -68,7 +68,7 @@ def _schema_listing(conn: sqlite3.Connection) -> str:
     ).fetchall()
     for (table,) in tables:
         # table_xinfo, not table_info: only the former lists generated columns
-        # (post_comments.author), which are exactly what a retry should use.
+        # (group_messages.author), which are exactly what a retry should use.
         cols = [row[1] for row in conn.execute(f"PRAGMA table_xinfo({table})")]
         lines.append(f"  {table}({', '.join(cols)})")
     lines.append("Full docs: references/schema.md")

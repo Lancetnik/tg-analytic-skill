@@ -170,8 +170,8 @@ standalone and writes to a separate DB, divorced from the channel's posts
 (the script logs a notice when it detects this).
 
 Scans group history into three tables: `group_messages` (every non-service
-message, comments included — see the overlap rule in
-[references/schema.md](references/schema.md)), `group_events` (joins/leaves
+message, comments included — the single comment store, which `scrape` also
+writes to; see [references/schema.md](references/schema.md)), `group_events` (joins/leaves
 — needs only membership, **not** admin), and an append-only
 `group_metrics` member-count snapshot per run.
 

@@ -23,12 +23,12 @@ require an originating channel post).
 A message published in the channel. Identified by its channel message id.
 
 **Comment**:
-A message in the discussion group replying (directly or transitively) to an auto-forwarded channel post. Stored in `post_comments`.
+A message in the discussion group replying (directly or transitively) to an auto-forwarded channel post. Stored in `group_messages` with `thread_post_id` set to the originating post's id.
 
 **Group message**:
 Any non-service message in the discussion group, comments included. The
-self-contained record for group analytics (`group_messages`); overlaps with
-Comment by design — `post_comments` remains the channel-scrape's view.
+single self-contained record for group analytics and comments
+(`group_messages`), written by both the channel scrape and the group scan.
 
 **Thread**:
 The set of group messages replying (directly or transitively) to one

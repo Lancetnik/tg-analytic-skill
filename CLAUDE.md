@@ -59,8 +59,8 @@ Scrape selection flags are mutually exclusive; default to `--latest N`
   these warnings are expected noise, not real errors.
 - Every command prints a Markdown summary to stdout designed to be pasted to the
   user as-is. When adding a command, follow that convention (`summarize_*`).
-- `group_messages` deliberately duplicates comments that `post_comments`
-  also holds (see docs/adr/0001): thread structure / reactions / engagement →
-  query `group_messages` (always filter `is_thread_root = 0`); per-post
-  comment counts → `post_comments`. `group_events` PK is `(id, user_id)` —
-  one add-user service message can carry several users.
+- `group_messages` is the **only** comment store (docs/adr/0002 superseded
+  the separate `post_comments` table): `scrape`/`fetch` replace each post's
+  thread (`thread_post_id` = post id), `group` upserts its scan window.
+  Engagement queries always filter `is_thread_root = 0`. `group_events` PK
+  is `(id, user_id)` — one add-user service message can carry several users.
