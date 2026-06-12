@@ -37,3 +37,6 @@ node_modules/
 skills-lock.json
 
 .codegraph
+
+# Superpowers working artifacts (specs/plans) — local only; decisions live in docs/adr/
+docs/superpowers/
