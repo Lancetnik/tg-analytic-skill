@@ -44,4 +44,5 @@ A dated service message in the discussion group recording a user joining
 
 **Leave event**:
 A dated service message recording a user leaving the discussion group —
-self-leave or removed by an admin.
+self-leave, removed by an admin, or actor unknown (Telegram omits the
+actor e.g. when auto-removing deleted accounts).

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 @dataclass
 class GroupEvent:
     """One membership change. kind: 'join'|'leave'; via: join → 'link'|
-    'request'|'added', leave → 'self'|'removed'."""
+    'request'|'added', leave → 'self'|'removed'|'unknown'."""
     id: int
     date: str | None
     kind: str
@@ -51,10 +51,17 @@ def classify_service_message(msg) -> list[GroupEvent]:
         return [GroupEvent(msg.id, date, "join", "added", uid) for uid in users]
     if name == "MessageActionChatDeleteUser":
         uid = getattr(action, "user_id", None)
-        # `uid is not None` guards the degenerate case where both ids are
-        # missing — None == None would misclassify an unknown actor as a
-        # self-leave.
-        via = "self" if uid is not None and uid == sender else "removed"
+        # Live data shows three actor states, not two: confirmed self-leave
+        # (sender == user), confirmed kick (sender is someone else), and NO
+        # actor at all (sender None — e.g. deleted accounts auto-removed by
+        # Telegram). Calling the last one either 'self' or 'removed' would
+        # silently skew churn numbers, so it gets its own value.
+        if sender is None:
+            via = "unknown"
+        elif uid is not None and uid == sender:
+            via = "self"
+        else:
+            via = "removed"
         return [GroupEvent(msg.id, date, "leave", via, uid)]
     return []
 

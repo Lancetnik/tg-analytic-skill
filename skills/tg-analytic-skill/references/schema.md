@@ -371,7 +371,10 @@ CREATE TABLE group_events (
 - `via` — joins: `link` (invite/CTA link) | `request` (approved join
   request) | `added` (added by a member, **or** the group's Join button —
   Telegram encodes a self-join as the user adding themselves). Leaves:
-  `self` | `removed`.
+  `self` (confirmed self-leave) | `removed` (kicked by a known actor) |
+  `unknown` (no actor on the service message — e.g. deleted accounts
+  auto-removed by Telegram). Don't fold `unknown` into either bucket when
+  reporting churn.
 - Completeness caveat: Telegram suppresses join/leave service messages in
   very large groups — cross-check against `group_metrics.members`.
 
