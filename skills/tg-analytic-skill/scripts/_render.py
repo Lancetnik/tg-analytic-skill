@@ -347,7 +347,7 @@ def summarize_group(
           f"Leaves: {_via_breakdown(events, 'leave')}  |  "
           f"net {len(joins) - len(leaves):+d}")
     if overview.get("standalone"):
-        print("- Standalone group: no linked channel, so no threads.")
+        print("- Standalone mode: thread linkage skipped.")
 
     by_day: dict[str, Counter] = {}
     for e in events:
@@ -382,7 +382,10 @@ def summarize_group(
         for t in sorted(threads, key=lambda t: t["replies"], reverse=True):
             first = t.get("first_reply_minutes")
             first_str = f"{first:.0f}m" if first is not None else "—"
-            print(f"| {t['post_link'] or t['post_id']} | {t['replies']} "
+            # A thread whose channel post was deleted has no link — label it
+            # instead of printing a bare id.
+            post = t["post_link"] or f"post {t['post_id']} (deleted)"
+            print(f"| {post} | {t['replies']} "
                   f"| {t['commenters']} | {first_str} | {_md_cell(t.get('snippet'))} |")
 
     if own:

@@ -575,15 +575,22 @@ async def process_post(
     comments = (
         await get_comments(client, channel_entity, parent) if with_comments else []
     )
+    # Without --comments we still know the count from the post itself; writing
+    # 0 would poison the post_metrics time-series.
+    comments_count = (
+        len(comments)
+        if with_comments
+        else (parent.replies.replies if parent.replies else 0)
+    )
 
     upsert_post(conn, channel, parent, attachments, forwarder_from_channel)
-    insert_metrics(conn, parent, scrape_date, len(comments), len(fwd_data))
+    insert_metrics(conn, parent, scrape_date, comments_count, len(fwd_data))
     if with_comments:
         replace_thread_comments(conn, parent.id, comments)
     upsert_public_shares(conn, parent.id, fwd_data, scrape_date)
     conn.commit()
 
-    return _post_summary(parent, channel, len(comments), forwarder_from_channel)
+    return _post_summary(parent, channel, comments_count, forwarder_from_channel)
 
 
 async def _persist_messages(

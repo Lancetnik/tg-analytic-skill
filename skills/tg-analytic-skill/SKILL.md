@@ -143,7 +143,8 @@ uv run <skill_dir>/scripts/tg_scrape.py fetch 103 105 108 --channel @name
 
 Appends a new `post_metrics` row per id; replaces comments/attachments/shares for those posts. Missing ids are logged and skipped. Album members auto-group by `grouped_id`.
 
-Refresh only views/forwards/reactions (cheapest):
+Refresh metrics only — views/forwards/reactions/comments_count, no comment
+bodies (cheapest):
 
 ```
 uv run <skill_dir>/scripts/tg_scrape.py fetch 103 105 108 --channel @name \
