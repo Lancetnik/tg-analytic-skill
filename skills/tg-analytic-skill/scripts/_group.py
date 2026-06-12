@@ -51,7 +51,10 @@ def classify_service_message(msg) -> list[GroupEvent]:
         return [GroupEvent(msg.id, date, "join", "added", uid) for uid in users]
     if name == "MessageActionChatDeleteUser":
         uid = getattr(action, "user_id", None)
-        via = "self" if uid == sender else "removed"
+        # `uid is not None` guards the degenerate case where both ids are
+        # missing — None == None would misclassify an unknown actor as a
+        # self-leave.
+        via = "self" if uid is not None and uid == sender else "removed"
         return [GroupEvent(msg.id, date, "leave", via, uid)]
     return []
 
@@ -84,10 +87,8 @@ def _thread_head(msg) -> int | None:
     reply = getattr(msg, "reply_to", None)
     if reply is None:
         return None
-    return (
-        getattr(reply, "reply_to_top_id", None)
-        or getattr(reply, "reply_to_msg_id", None)
-    )
+    top = getattr(reply, "reply_to_top_id", None)
+    return top if top is not None else getattr(reply, "reply_to_msg_id", None)
 
 
 def thread_post_id_for(msg, root_map: dict[int, int]) -> int | None:
