@@ -84,9 +84,49 @@ CREATE TABLE subscriber_sources (
     joins    INTEGER,
     PRIMARY KEY (date, source)
 );
+
+CREATE TABLE group_messages (
+    id               INTEGER PRIMARY KEY,
+    date             TEXT,
+    text             TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    reply_to_msg_id  INTEGER,
+    thread_post_id   INTEGER,
+    is_thread_root   INTEGER NOT NULL DEFAULT 0,
+    reactions        INTEGER,
+    media_type       TEXT
+);
+CREATE INDEX idx_group_messages_thread ON group_messages(thread_post_id);
+
+CREATE TABLE group_events (
+    id             INTEGER NOT NULL,
+    date           TEXT,
+    kind           TEXT,
+    via            TEXT,
+    user_id        INTEGER,
+    user_name      TEXT,
+    user_username  TEXT,
+    author         TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    PRIMARY KEY (id, user_id)
+);
+
+CREATE TABLE group_metrics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scrape_date  TEXT NOT NULL,
+    group_link   TEXT,
+    group_title  TEXT,
+    members      INTEGER
+);
 ```
 
-Date/time columns are ISO-8601 strings throughout (`posts.date`, `posts.edit_date`, `post_comments.date`, `public_channels.last_seen`, `public_shares.first_seen`, `post_metrics.scrape_date`). Use SQLite's `date()`, `datetime()`, `strftime()` directly — no conversion needed.
+Date/time columns are ISO-8601 strings throughout (`posts.date`, `posts.edit_date`, `post_comments.date`, `public_channels.last_seen`, `public_shares.first_seen`, `post_metrics.scrape_date`, `group_messages.date`, `group_events.date`, `group_metrics.scrape_date`). Use SQLite's `date()`, `datetime()`, `strftime()` directly — no conversion needed.
 
 ## Repost direction cheat-sheet
 
@@ -268,6 +308,92 @@ CREATE TABLE subscriber_sources (
 - `source` — Telegram-supplied label. Observed values: `URL`, `Search`, `Groups`, `Channels`, `Other`. Don't assume the set is closed.
 - `joins` — new subscribers from this source on this date. Sum across all sources for a given `date` equals (or closely approximates) `subscribers.joins` for the same date.
 
+## `group_messages` — the discussion group, self-contained
+
+Written by the `group` command. **Deliberately overlaps `post_comments`**
+(see ADR-0001): comment counts per post → `post_comments`; thread
+structure, reactions, per-user engagement → here. Don't count comments
+from both.
+
+```sql
+CREATE TABLE group_messages (
+    id               INTEGER PRIMARY KEY,
+    date             TEXT,
+    text             TEXT,
+    user_id          INTEGER,
+    user_name        TEXT,
+    user_username    TEXT,
+    author           TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    reply_to_msg_id  INTEGER,
+    thread_post_id   INTEGER,
+    is_thread_root   INTEGER NOT NULL DEFAULT 0,
+    reactions        INTEGER,
+    media_type       TEXT
+);
+```
+
+- `id` — group-side message id. Distinct id space from `posts.id`.
+- `thread_post_id` — **channel** post id of the thread this message
+  belongs to (joins `posts.id` directly). NULL = top-level chatter.
+  Always NULL for a standalone group's DB.
+- `reply_to_msg_id` — raw group-side parent id (reply chains *within* a
+  thread). Don't join it to `posts`.
+- `is_thread_root` — 1 = the auto-forwarded channel post heading a
+  thread. **Engagement aggregates must filter `is_thread_root = 0`** —
+  roots carry the channel post's reactions and would double-count.
+- `reactions` — reaction count at last scan (upserted in place, not a
+  time series; paid stars folded in).
+- `author` — same generated convenience identity as `post_comments`.
+
+## `group_events` — joins & leaves
+
+```sql
+CREATE TABLE group_events (
+    id             INTEGER NOT NULL,
+    date           TEXT,
+    kind           TEXT,
+    via            TEXT,
+    user_id        INTEGER,
+    user_name      TEXT,
+    user_username  TEXT,
+    author         TEXT GENERATED ALWAYS AS (
+        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
+    ) VIRTUAL,
+    PRIMARY KEY (id, user_id)
+);
+```
+
+- `id` — service-message id. PK is `(id, user_id)`: one add-user service
+  message can add several users.
+- `kind` — `join` | `leave`.
+- `via` — joins: `link` (invite/CTA link) | `request` (approved join
+  request) | `added` (added by a member, **or** the group's Join button —
+  Telegram encodes a self-join as the user adding themselves). Leaves:
+  `self` | `removed`.
+- Completeness caveat: Telegram suppresses join/leave service messages in
+  very large groups — cross-check against `group_metrics.members`.
+
+## `group_metrics` — append-only snapshots
+
+```sql
+CREATE TABLE group_metrics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scrape_date  TEXT NOT NULL,
+    group_link   TEXT,
+    group_title  TEXT,
+    members      INTEGER
+);
+```
+
+- Same idiom as `post_metrics`: one row per `group` run, **`MAX(id)` =
+  latest snapshot**, not `MAX(scrape_date)`.
+- `group_link`/`group_title` double as the identity record of which
+  group this DB's group_* rows came from.
+- `members` — participants_count at scan time; drift vs cumulative
+  `joins - leaves` reveals event-log gaps.
+
 ## Common joins
 
 Who re-shared YOUR post (other channels that forwarded your content):
@@ -309,4 +435,26 @@ FROM posts p
 JOIN post_metrics m ON m.id IN (SELECT id FROM latest) AND m.post_id = p.id
 ORDER BY m.reactions DESC
 LIMIT 10;
+```
+
+Joins attributable to a post's CTA (window: post publish + N days):
+
+```sql
+SELECT COUNT(*) AS joins
+FROM group_events e, posts p
+WHERE p.id = :post_id
+  AND e.kind = 'join'
+  AND e.date >= p.date
+  AND e.date < datetime(p.date, '+7 days');
+```
+
+Thread stats per post (engagement excludes roots — always):
+
+```sql
+SELECT gm.thread_post_id AS post_id, COUNT(*) AS replies,
+       COUNT(DISTINCT gm.author) AS commenters
+FROM group_messages gm
+WHERE gm.is_thread_root = 0 AND gm.thread_post_id IS NOT NULL
+GROUP BY gm.thread_post_id
+ORDER BY replies DESC;
 ```
