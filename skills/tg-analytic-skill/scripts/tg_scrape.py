@@ -32,6 +32,7 @@ from telethon.tl.types import (
     Message,
     MessageMediaDocument,
     MessageMediaPhoto,
+    MessageService,
     PeerChannel,
     PublicForwardMessage,
     ReactionPaid,
@@ -40,7 +41,15 @@ from telethon.tl.types import (
 )
 
 from _common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
+from _group import (
+    GroupEvent,
+    auto_forward_post_id,
+    classify_service_message,
+    thread_post_id_for,
+    unresolved_root_refs,
+)
 from _render import (
+    summarize_group,
     summarize_scheduled,
     summarize_scrape,
     summarize_subscribers,
@@ -1031,6 +1040,343 @@ def _media_desc(msg: Message) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Discussion-group analytics
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GroupTarget:
+    entity: object          # the group, resolved
+    title: str | None
+    link: str
+    members: int | None
+    channel_id: int | None  # linked channel's id; None = standalone
+
+
+async def resolve_group_target(
+    client: TelegramClient, channel: str | None, group: str | None
+) -> GroupTarget:
+    """Resolve the group to scan from exactly one of --channel/--group.
+
+    --channel: the channel's linked discussion group (error if none).
+    --group: the group itself, treated as standalone — if it turns out to
+    be linked to a channel, log a notice suggesting --channel and proceed
+    (explicit beats clever: never silently redirect to another DB)."""
+    if channel:
+        ch_entity = await client.get_entity(channel)
+        full = await client(GetFullChannelRequest(ch_entity))
+        linked = full.full_chat.linked_chat_id
+        if not linked:
+            log.error(
+                "%s has no linked discussion group - nothing to scan", channel
+            )
+            raise typer.Exit(code=1)
+        entity = await client.get_entity(PeerChannel(linked))
+        channel_id = ch_entity.id
+    else:
+        entity = await client.get_entity(group)
+        channel_id = None
+
+    g_full = await client(GetFullChannelRequest(entity))
+    if group and g_full.full_chat.linked_chat_id:
+        log.warning(
+            "%s is the discussion group of a channel (id %d) - to get "
+            "thread analytics, re-run with --channel <that channel>",
+            group, g_full.full_chat.linked_chat_id,
+        )
+    username = getattr(entity, "username", None)
+    link = f"https://t.me/{username}" if username else f"https://t.me/c/{entity.id}"
+    return GroupTarget(
+        entity=entity,
+        title=getattr(entity, "title", None),
+        link=link,
+        members=g_full.full_chat.participants_count,
+        channel_id=channel_id,
+    )
+
+
+def _sender_fields(msg: Message) -> tuple[int | None, str | None, str | None]:
+    """(user_id, display name, username) for a message's sender — the same
+    extraction get_comments does, shared shape with post_comments."""
+    sender = msg.sender
+    if sender is None:
+        peer = getattr(msg, "from_id", None)
+        return getattr(peer, "user_id", None), None, None
+    first = getattr(sender, "first_name", "") or ""
+    last = getattr(sender, "last_name", "") or ""
+    name = (first + " " + last).strip() or getattr(sender, "title", None)
+    return sender.id, name or None, getattr(sender, "username", None)
+
+
+def upsert_group_messages(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    conn.executemany(
+        """
+        INSERT INTO group_messages (
+            id, date, text, user_id, user_name, user_username,
+            reply_to_msg_id, thread_post_id, is_thread_root,
+            reactions, media_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            date            = excluded.date,
+            text            = excluded.text,
+            user_id         = excluded.user_id,
+            user_name       = excluded.user_name,
+            user_username   = excluded.user_username,
+            reply_to_msg_id = excluded.reply_to_msg_id,
+            thread_post_id  = excluded.thread_post_id,
+            is_thread_root  = excluded.is_thread_root,
+            reactions       = excluded.reactions,
+            media_type      = excluded.media_type
+        """,
+        rows,
+    )
+
+
+def upsert_group_events(
+    conn: sqlite3.Connection,
+    events: list[GroupEvent],
+    users: dict[int, tuple[str | None, str | None]],
+) -> None:
+    conn.executemany(
+        """
+        INSERT INTO group_events (
+            id, date, kind, via, user_id, user_name, user_username
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id, user_id) DO UPDATE SET
+            date          = excluded.date,
+            kind          = excluded.kind,
+            via           = excluded.via,
+            user_name     = excluded.user_name,
+            user_username = excluded.user_username
+        """,
+        [
+            (e.id, e.date, e.kind, e.via, e.user_id,
+             *(users.get(e.user_id) or (None, None)))
+            for e in events
+        ],
+    )
+
+
+def insert_group_metrics(
+    conn: sqlite3.Connection, scrape_date: str, target: GroupTarget
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO group_metrics (scrape_date, group_link, group_title, members)
+        VALUES (?, ?, ?, ?)
+        """,
+        (scrape_date, target.link, target.title, target.members),
+    )
+
+
+async def _resolve_event_users(
+    client: TelegramClient, events: list[GroupEvent]
+) -> dict[int, tuple[str | None, str | None]]:
+    """user_id -> (name, username) for event subjects. Added-user events
+    reference users who never sent a message, so iter_messages' entity
+    cache may miss them; resolve individually, tolerating dead accounts."""
+    users: dict[int, tuple[str | None, str | None]] = {}
+    for uid in {e.user_id for e in events if e.user_id is not None}:
+        try:
+            entity = await client.get_entity(uid)
+            first = getattr(entity, "first_name", "") or ""
+            last = getattr(entity, "last_name", "") or ""
+            users[uid] = (
+                (first + " " + last).strip() or None,
+                getattr(entity, "username", None),
+            )
+        except Exception as e:
+            log.debug("event user %d unresolvable (%s)", uid, e)
+            users[uid] = (None, None)
+    return users
+
+
+def _group_message_row(msg: Message, root_map: dict[int, int]) -> tuple:
+    uid, name, username = _sender_fields(msg)
+    reactions, stars = count_reactions(msg)
+    is_root = msg.id in root_map
+    thread_post = (
+        root_map[msg.id] if is_root else thread_post_id_for(msg, root_map)
+    )
+    return (
+        msg.id,
+        msg.date.isoformat() if msg.date else None,
+        msg.text or "",
+        uid,
+        name,
+        username,
+        msg.reply_to_msg_id,
+        thread_post,
+        1 if is_root else 0,
+        reactions + stars,
+        media_type(msg),
+    )
+
+
+def _load_thread_stats(
+    conn: sqlite3.Connection, lo: int, hi: int
+) -> list[dict]:
+    """Per-thread stats for threads touched in the scanned id window,
+    joined to posts for snippet/link and time-to-first-reply."""
+    rows = conn.execute(
+        """
+        SELECT gm.thread_post_id, p.link, substr(COALESCE(p.text, ''), 1, 80),
+               p.date, COUNT(*), COUNT(DISTINCT gm.author), MIN(gm.date)
+        FROM group_messages gm
+        LEFT JOIN posts p ON p.id = gm.thread_post_id
+        WHERE gm.is_thread_root = 0
+          AND gm.thread_post_id IS NOT NULL
+          AND gm.id BETWEEN ? AND ?
+        GROUP BY gm.thread_post_id
+        """,
+        (lo, hi),
+    ).fetchall()
+    threads = []
+    for post_id, link, snippet, post_date, replies, commenters, first in rows:
+        minutes = None
+        if post_date and first:
+            try:
+                delta = (
+                    datetime.fromisoformat(first)
+                    - datetime.fromisoformat(post_date)
+                ).total_seconds()
+                minutes = max(delta, 0) / 60
+            except ValueError:
+                pass
+        threads.append(
+            {
+                "post_id": post_id,
+                "post_link": link,
+                "snippet": snippet,
+                "replies": replies,
+                "commenters": commenters,
+                "first_reply_minutes": minutes,
+            }
+        )
+    return threads
+
+
+async def scan_group(
+    channel: str | None,
+    group: str | None,
+    output_dir: Path,
+    session_file: str,
+    limit: int | None,
+    offset_id: int,
+    offset_date: datetime | None,
+    latest: int | None,
+) -> None:
+    """Scan the discussion group: messages + membership events + a member
+    snapshot. Selection semantics mirror `scrape` (same flags, same
+    --latest newest-first flip, same inclusive --offset-id)."""
+    scrape_date = datetime.now(UTC).isoformat()
+    handle = channel or group
+    label = channel or group
+
+    if latest is not None:
+        reverse, iter_limit = False, latest
+        iter_offset_id, iter_offset_date = 0, None
+    else:
+        reverse, iter_limit = True, limit
+        iter_offset_id = offset_id - 1 if offset_id else 0
+        iter_offset_date = offset_date
+
+    conn = open_db(output_dir, handle)
+    try:
+        async with channel_session(session_file) as (client, _):
+            target = await resolve_group_target(client, channel, group)
+            log.info(
+                "authenticated, scanning group %s (%s)",
+                target.title or target.link, label,
+            )
+            raw = [
+                m
+                async for m in client.iter_messages(
+                    target.entity,
+                    limit=iter_limit,
+                    reverse=reverse,
+                    offset_id=iter_offset_id,
+                    offset_date=iter_offset_date,
+                )
+            ]
+            log.info("fetched %d group messages", len(raw))
+
+            service = [m for m in raw if isinstance(m, MessageService)]
+            ordinary = [m for m in raw if isinstance(m, Message)]
+
+            events = [e for m in service for e in classify_service_message(m)]
+            users = await _resolve_event_users(client, events)
+
+            root_map = {
+                m.id: pid
+                for m in ordinary
+                if (pid := auto_forward_post_id(m, target.channel_id))
+            }
+            # Comments whose thread root fell outside the window: fetch the
+            # referenced heads once and keep the ones that are real roots.
+            missing = unresolved_root_refs(ordinary, root_map)
+            if missing and target.channel_id is not None:
+                log.info("resolving %d out-of-window thread heads", len(missing))
+                fetched = await client.get_messages(
+                    target.entity, ids=sorted(missing)
+                )
+                for m in fetched:
+                    if not isinstance(m, Message):
+                        continue
+                    pid = auto_forward_post_id(m, target.channel_id)
+                    if pid:
+                        root_map[m.id] = pid
+                        ordinary.append(m)
+
+            rows = [_group_message_row(m, root_map) for m in ordinary]
+            upsert_group_messages(conn, rows)
+            upsert_group_events(conn, events, users)
+            insert_group_metrics(conn, scrape_date, target)
+            conn.commit()
+            log.info(
+                "stored %d message(s), %d event(s) in %s",
+                len(rows), len(events), db_path_for(output_dir, handle),
+            )
+
+        ids = [m.id for m in ordinary] + [e.id for e in events]
+        lo, hi = (min(ids), max(ids)) if ids else (0, 0)
+        threads = (
+            _load_thread_stats(conn, lo, hi)
+            if target.channel_id is not None
+            else []
+        )
+    finally:
+        conn.close()
+
+    overview = {
+        "title": target.title,
+        "link": target.link,
+        "members": target.members,
+        "standalone": target.channel_id is None,
+        "id_range": f"{lo}..{hi}" if ids else "—",
+    }
+    messages = [
+        {
+            "id": r[0], "date": r[1], "text": r[2],
+            "author": r[5] or r[4] or (str(r[3]) if r[3] else None),
+            "reply_to_msg_id": r[6], "thread_post_id": r[7],
+            "is_thread_root": r[8], "reactions": r[9],
+        }
+        for r in rows
+    ]
+    event_dicts = [
+        {
+            "kind": e.kind, "via": e.via, "date": e.date,
+            "author": (users.get(e.user_id) or (None, None))[1]
+            or (users.get(e.user_id) or (None, None))[0]
+            or (str(e.user_id) if e.user_id else None),
+        }
+        for e in events
+    ]
+    summarize_group(label, overview, messages, event_dicts, threads)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1205,6 +1551,72 @@ def scheduled(
     channel."""
     _prepare(session_file)
     asyncio.run(fetch_scheduled(channel, session_file))
+
+
+@app.command("group")
+def group_cmd(
+    channel: Annotated[
+        str | None,
+        typer.Option(
+            help="Channel username - scan its linked discussion group "
+            "(rows land in the CHANNEL's DB, threads join to posts)."
+        ),
+    ] = None,
+    group: Annotated[
+        str | None,
+        typer.Option(
+            help="Group username - scan a standalone group (own DB, no "
+            "thread linkage). For a group attached to a channel you "
+            "analyze, prefer --channel."
+        ),
+    ] = None,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    session_file: SessionOpt = DEFAULT_SESSION,
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            help="Max messages fetched in the chronological walk. Use with "
+            "--offset-id/--offset-date to cap a forward page; for 'N newest' "
+            "use --latest instead."
+        ),
+    ] = None,
+    offset_id: Annotated[
+        int,
+        typer.Option(
+            help="Start at this group-message id (inclusive) and walk "
+            "forward. 0 = walk from the beginning of history."
+        ),
+    ] = 0,
+    offset_date: Annotated[
+        datetime | None,
+        typer.Option(
+            formats=["%d-%m-%Y", "%d-%m-%Y %H:%M:%S"],
+            help="Start after this date and walk forward to newer messages.",
+        ),
+    ] = None,
+    latest: Annotated[
+        int | None,
+        typer.Option(
+            help="Fetch the N most recent group messages (newest-first). "
+            "Overrides --limit/--offset-id/--offset-date."
+        ),
+    ] = None,
+    verbose: VerboseOpt = False,
+) -> None:
+    """Scan a discussion group: messages, threads, join/leave events.
+
+    Joins/leaves come from the group's service messages (membership
+    needed, no admin). Pass exactly one of --channel/--group."""
+    if (channel is None) == (group is None):
+        typer.echo("Pass exactly one of --channel or --group.", err=True)
+        raise typer.Exit(code=2)
+    _prepare(session_file, verbose)
+    asyncio.run(
+        scan_group(
+            channel, group, output_dir, session_file,
+            limit, offset_id, offset_date, latest,
+        )
+    )
 
 
 @app.command("login")
