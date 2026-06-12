@@ -39,13 +39,18 @@ npx skills@latest add Lancetnik/tg-analytic-skill --skill tg-analytic-skill --ye
 ## First-run setup
 
 The scraping commands need Telegram API credentials
-([create them here](https://my.telegram.org/apps)). In the install target
-directory, copy the bundled `.env.example` and fill it in:
+([create them here](https://my.telegram.org/apps)). All runtime state lives
+in `.tg-analytic/` at your **project root** (the directory you run commands
+from) — never inside the skill. The examples below use `$SKILL` for wherever
+the skill landed (`.claude/skills/tg-analytic-skill` or
+`.agents/skills/tg-analytic-skill` in a project; `skills/tg-analytic-skill`
+in this repo):
 
 ```bash
-cd .claude/skills/tg-analytic-skill
-cp .env.example .env
-# edit .env: TG_API_ID, TG_API_HASH, TG_PHONE
+SKILL=.claude/skills/tg-analytic-skill   # adjust to your install
+mkdir -p .tg-analytic
+cp "$SKILL/.env.example" .tg-analytic/.env
+# edit .tg-analytic/.env: TG_API_ID, TG_API_HASH, TG_PHONE
 ```
 
 If you ask Claude to analyze a channel before `.env` exists, the skill will
@@ -55,7 +60,7 @@ Then authenticate once — **in your own terminal**, not via Claude — so
 Telethon can prompt for the SMS code and 2FA password on stdin:
 
 ```bash
-uv run scripts/tg_scrape.py login
+uv run "$SKILL/scripts/tg_scrape.py" login
 ```
 
 This writes `session.session`; every later scrape/fetch/subscribers/views
@@ -70,30 +75,31 @@ Inside Claude Code, ask the skill to analyze a channel:
 > Who's forwarding @some_channel? Which channels do they cite most often?
 > Refresh metrics on the last 20 posts of @some_channel.
 
-Or run the bundled CLIs directly:
+Or run the bundled CLIs directly — always from the **project root** (the
+scripts anchor `.tg-analytic/` on the current working directory):
 
 ```bash
-cd .claude/skills/tg-analytic-skill
+SKILL=.claude/skills/tg-analytic-skill   # adjust to your install
 
 # Fast first look — newest 100, skip media downloads
-uv run scripts/tg_scrape.py scrape --channel @some_channel --latest 100 --no-media
+uv run "$SKILL/scripts/tg_scrape.py" scrape --channel @some_channel --latest 100 --no-media
 
 # Full history (long-running)
-uv run scripts/tg_scrape.py scrape --channel @some_channel
+uv run "$SKILL/scripts/tg_scrape.py" scrape --channel @some_channel
 
 # Incremental refresh from a date / from a known post id
-uv run scripts/tg_scrape.py scrape --channel @some_channel --offset-date 01-05-2026
-uv run scripts/tg_scrape.py scrape --channel @some_channel --offset-id 1234
+uv run "$SKILL/scripts/tg_scrape.py" scrape --channel @some_channel --offset-date 01-05-2026
+uv run "$SKILL/scripts/tg_scrape.py" scrape --channel @some_channel --offset-id 1234
 
 # Reindex specific posts (refresh metrics / comments)
-uv run scripts/tg_scrape.py fetch 103 105 108 --channel @some_channel
+uv run "$SKILL/scripts/tg_scrape.py" fetch 103 105 108 --channel @some_channel
 
 # Channel-admin-only: subscriber dynamics and best time to post
-uv run scripts/tg_scrape.py subscribers --channel @some_channel
-uv run scripts/tg_scrape.py views --channel @some_channel
+uv run "$SKILL/scripts/tg_scrape.py" subscribers --channel @some_channel
+uv run "$SKILL/scripts/tg_scrape.py" views --channel @some_channel
 
 # Read-only SQL over the per-channel DB (no credentials, no network)
-uv run scripts/tg_query.py --channel @some_channel \
+uv run "$SKILL/scripts/tg_query.py" --channel @some_channel \
   "SELECT p.id, p.link, m.views FROM posts p
    JOIN post_metrics m ON p.id = m.post_id
    ORDER BY m.views DESC LIMIT 10"

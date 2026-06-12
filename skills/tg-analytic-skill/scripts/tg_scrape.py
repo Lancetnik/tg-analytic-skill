@@ -108,10 +108,13 @@ def _require_session(session_file: str) -> None:
     inside a Bash subprocess. Surface that with a clear message instead of
     deadlocking on input()."""
     if not Path(session_file).exists():
+        # Print this script's real path — the skill installs under varying
+        # roots (.claude/skills/, .agents/skills/, the source repo), so a
+        # hardcoded relative path would point nowhere for most users.
         typer.echo(
             f"Telegram session not found at {session_file}\n"
-            "Run `uv run scripts/tg_scrape.py login` in your own terminal first "
-            "(interactive — needs an SMS code).",
+            f"Run `uv run {Path(__file__).resolve()} login` in your own "
+            "terminal first (interactive — needs an SMS code).",
             err=True,
         )
         raise typer.Exit(code=1)
