@@ -10,14 +10,14 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+from _common import DEFAULT_OUTPUT_DIR, db_path_for
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-DEFAULT_OUTPUT_DIR = Path.cwd() / ".tg-analytic"
 
 # Strip leading `-- line comments` and `/* block comments */` so we can inspect
 # the first real keyword. We don't try to parse strings - any leading SELECT
@@ -55,12 +55,6 @@ def validate_read_only(sql: str) -> None:
     trimmed = body.rstrip().rstrip(";").rstrip()
     if ";" in trimmed:
         raise ValueError("multi-statement queries are not allowed")
-
-
-def db_path_for(output_dir: Path, channel: str) -> Path:
-    """One DB file per channel, e.g. .tg-analytic/fastnewsdev.db."""
-    safe = channel.lstrip("@").replace("/", "_") or "channel"
-    return output_dir / f"{safe}.db"
 
 
 def _schema_listing(conn: sqlite3.Connection) -> str:

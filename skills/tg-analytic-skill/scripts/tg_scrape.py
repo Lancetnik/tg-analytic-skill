@@ -12,8 +12,7 @@ import logging
 import os
 import re
 import sqlite3
-from collections import Counter
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +21,6 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.client.telegrambaseclient import DEFAULT_DC_ID, DEFAULT_IPV4_IP
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.functions.messages import GetScheduledHistoryRequest
 from telethon.tl.functions.stats import (
@@ -41,7 +39,14 @@ from telethon.tl.types import (
     StatsGraphAsync,
 )
 
-DATA_DIR = Path.cwd() / ".tg-analytic"
+from _common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
+from _render import (
+    summarize_scheduled,
+    summarize_scrape,
+    summarize_subscribers,
+    summarize_views,
+)
+
 load_dotenv(DATA_DIR / ".env")
 
 logging.basicConfig(
@@ -66,59 +71,34 @@ def _log_progress(done: int, total: int, current: str, id_range: str) -> None:
     if done == total or done % PROGRESS_EVERY == 0:
         log.info("[%d/%d] processed (ids: %s)", done, total, id_range)
 
-API_ID = int(os.environ["TG_API_ID"])
-API_HASH = os.environ["TG_API_HASH"]
-PHONE = os.environ["TG_PHONE"]
 
-DEFAULT_OUTPUT_DIR = DATA_DIR
 DEFAULT_SESSION_FILE = DATA_DIR / "session.session"
 
-# Telethon dials Telegram's data centers by fixed IP, which a domain-allowlist
-# sandbox blocks. Set TG_DC_DNS_SUFFIX to a wildcard-DNS domain (e.g. `nip.io`
-# or `sslip.io`, where `1.2.3.4.nip.io` resolves to 1.2.3.4) to make every DC
-# connection dial `<dc-ip>.<suffix>` instead - a hostname that resolves back to
-# the same MTProto IP, so you can allowlist just that one domain. Unset (default)
-# keeps the raw-IP behavior unchanged.
-DC_DNS_SUFFIX = os.environ.get("TG_DC_DNS_SUFFIX", "").strip().lstrip(".")
 
+def _credentials() -> tuple[int, str, str]:
+    """Read TG_API_ID / TG_API_HASH / TG_PHONE lazily, at connect time.
 
-def _strip_dc_suffix(addr: str | None) -> str | None:
-    """Drop a trailing `.<suffix>` so we never double-wrap a persisted address."""
-    if addr and DC_DNS_SUFFIX and addr.endswith(f".{DC_DNS_SUFFIX}"):
-        return addr[: -(len(DC_DNS_SUFFIX) + 1)]
-    return addr
+    Reading them at import time would crash even `--help` with a bare KeyError
+    when .tg-analytic/.env doesn't exist yet; deferring turns that into a
+    clear, actionable message on the first command that actually connects."""
+    try:
+        return (
+            int(os.environ["TG_API_ID"]),
+            os.environ["TG_API_HASH"],
+            os.environ["TG_PHONE"],
+        )
+    except KeyError as e:
+        typer.echo(
+            f"Missing {e.args[0]} - put TG_API_ID/TG_API_HASH/TG_PHONE in "
+            f"{DATA_DIR / '.env'} (see the skill's .env.example).",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
 
 
 def make_client(session_file: str) -> TelegramClient:
-    """Build the Telethon client, optionally routing DCs via TG_DC_DNS_SUFFIX.
-
-    With the suffix set, both the bootstrap address (session.server_address) and
-    every DC resolved later for migrations / exported senders / media downloads
-    (`_get_dc`) are rewritten from `<ip>` to `<ip>.<suffix>`, so all traffic
-    leaves as hostname connections the sandbox can allowlist."""
-    client = TelegramClient(str(session_file), API_ID, API_HASH)
-    session = client.session
-    if not DC_DNS_SUFFIX or session is None:
-        return client
-
-    ip = _strip_dc_suffix(session.server_address) or DEFAULT_IPV4_IP
-    session.set_dc(
-        session.dc_id or DEFAULT_DC_ID,
-        f"{ip}.{DC_DNS_SUFFIX}",
-        session.port or 443,
-    )
-
-    _orig_get_dc = client._get_dc
-
-    async def _get_dc(dc_id, cdn=False):
-        dc = await _orig_get_dc(dc_id, cdn=cdn)
-        if not cdn and dc.ip_address and not dc.ip_address.endswith(f".{DC_DNS_SUFFIX}"):
-            dc.ip_address = f"{dc.ip_address}.{DC_DNS_SUFFIX}"
-        return dc
-
-    client._get_dc = _get_dc
-    log.info("routing Telegram DCs via *.%s (sandbox domain mode)", DC_DNS_SUFFIX)
-    return client
+    api_id, api_hash, _ = _credentials()
+    return TelegramClient(str(session_file), api_id, api_hash)
 
 
 def _require_session(session_file: str) -> None:
@@ -137,127 +117,21 @@ def _require_session(session_file: str) -> None:
         raise typer.Exit(code=1)
 
 
+@asynccontextmanager
+async def channel_session(session_file: str, channel: str | None = None):
+    """Connected Telegram client with an owned lifecycle.
 
-# ---------------------------------------------------------------------------
-# SQLite schema & helpers
-# ---------------------------------------------------------------------------
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS posts (
-    id                     INTEGER PRIMARY KEY,
-    link                   TEXT,
-    date                   TEXT,
-    text                   TEXT,
-    edit_date              TEXT,
-    reply_to_msg_id        INTEGER,
-    tags                   TEXT,
-    grouped_id             INTEGER,
-    forwarder_from_channel TEXT
-);
-
-CREATE TABLE IF NOT EXISTS post_attachments (
-    post_id        INTEGER NOT NULL,
-    attachment_id  INTEGER NOT NULL,
-    link           TEXT,
-    media_type     TEXT,
-    photo_path     TEXT,
-    PRIMARY KEY (post_id, attachment_id)
-);
-
-CREATE TABLE IF NOT EXISTS post_metrics (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    post_id         INTEGER NOT NULL,
-    scrape_date     TEXT    NOT NULL,
-    views           INTEGER,
-    forwards        INTEGER,
-    reactions       INTEGER,
-    stars           INTEGER,
-    comments_count  INTEGER,
-    public_forwards_count INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_post_metrics_post
-    ON post_metrics(post_id);
-
-CREATE TABLE IF NOT EXISTS post_comments (
-    post_id          INTEGER NOT NULL,
-    id               INTEGER NOT NULL,
-    date             TEXT,
-    text             TEXT,
-    user_id          INTEGER,
-    user_name        TEXT,
-    user_username    TEXT,
-    author           TEXT GENERATED ALWAYS AS (
-        COALESCE(user_username, user_name, CAST(user_id AS TEXT))
-    ) VIRTUAL,
-    PRIMARY KEY (post_id, id)
-);
-
-CREATE TABLE IF NOT EXISTS public_channels (
-    link         TEXT PRIMARY KEY,
-    name         TEXT,
-    description  TEXT,
-    subscribers  INTEGER,
-    last_seen    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS public_shares (
-    post_id         INTEGER NOT NULL,
-    forwarder_link  TEXT    NOT NULL,
-    msg_link        TEXT    NOT NULL,
-    first_seen      TEXT,
-    PRIMARY KEY (post_id, forwarder_link, msg_link)
-);
-
-CREATE TABLE IF NOT EXISTS subscribers (
-    date     TEXT PRIMARY KEY,
-    total    INTEGER,
-    joins    INTEGER,
-    leaves   INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS subscriber_sources (
-    date     TEXT    NOT NULL,
-    source   TEXT    NOT NULL,
-    joins    INTEGER,
-    PRIMARY KEY (date, source)
-);
-"""
-
-
-def db_path_for(output_dir: Path, channel: str) -> Path:
-    """One DB file per channel, e.g. .tg-analytic/fastnewsdev.db."""
-    safe = channel.lstrip("@").replace("/", "_") or "channel"
-    return output_dir / f"{safe}.db"
-
-
-def _add_missing_columns(conn: sqlite3.Connection) -> None:
-    """Back-fill columns added to SCHEMA after a DB file was created.
-
-    CREATE TABLE IF NOT EXISTS never alters an existing table, so new columns
-    must be ALTERed in here. Idempotent: each ALTER runs only when its column
-    is absent. `author` is a generated VIRTUAL column (computed on read, no row
-    rewrite) — single human-readable commenter identity so LLM-generated SQL
-    can say `GROUP BY author` without knowing the user_* split. Needs SQLite
-    >= 3.31 (2020); CPython 3.10+ bundles newer. table_xinfo, not table_info:
-    only the former lists generated columns, and missing `author` here would
-    re-ALTER it on every open."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_xinfo(post_comments)")}
-    if "author" not in cols:
-        conn.execute(
-            "ALTER TABLE post_comments ADD COLUMN author TEXT GENERATED ALWAYS AS "
-            "(COALESCE(user_username, user_name, CAST(user_id AS TEXT))) VIRTUAL"
-        )
-        conn.commit()
-
-
-def open_db(output_dir: Path, channel: str) -> sqlite3.Connection:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path_for(output_dir, channel))
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SCHEMA)
-    _add_missing_columns(conn)
-    return conn
+    Yields `(client, entity)` — entity resolved when `channel` is given, None
+    otherwise (login). One home for the connect / resolve / disconnect dance
+    every command previously copied; the client never crosses this seam
+    unmanaged."""
+    client = make_client(session_file)
+    await client.start(phone=_credentials()[2])
+    try:
+        entity = await client.get_entity(channel) if channel else None
+        yield client, entity
+    finally:
+        await client.disconnect()
 
 
 @dataclass
@@ -307,6 +181,21 @@ def count_reactions(msg: Message) -> tuple[int, int]:
             else:
                 reactions += r.count
     return reactions, stars
+
+
+def group_albums(messages: list[Message]) -> list[list[Message]]:
+    """Group album members by grouped_id; standalone posts become singletons.
+
+    Shared by the persist pipeline and `scheduled` so the album invariant
+    (one logical post per grouped_id) lives in one place."""
+    groups: dict[int, list[Message]] = {}
+    standalone: list[Message] = []
+    for msg in messages:
+        if msg.grouped_id:
+            groups.setdefault(msg.grouped_id, []).append(msg)
+        else:
+            standalone.append(msg)
+    return [[m] for m in standalone] + list(groups.values())
 
 
 async def get_forward_source(
@@ -611,7 +500,7 @@ def upsert_public_channel(
 
 
 # ---------------------------------------------------------------------------
-# Scrape pipeline
+# Ingestion pipeline (shared by `scrape` and `fetch`)
 # ---------------------------------------------------------------------------
 
 
@@ -716,41 +605,29 @@ async def _persist_messages(
     with_media: bool,
     with_channel_info: bool,
 ) -> tuple[list[dict], list[dict]]:
-    """Group, persist and summarize a batch of fetched messages.
-
-    Shared between `scrape` (iter_messages) and `fetch` (get_messages by id)."""
-    groups: dict[int, list[Message]] = {}
-    standalone: list[Message] = []
-    for msg in raw:
-        if msg.grouped_id:
-            groups.setdefault(msg.grouped_id, []).append(msg)
-        else:
-            standalone.append(msg)
+    """Group, persist and summarize a batch of fetched messages."""
+    post_groups = group_albums(raw)
 
     post_summaries: list[dict] = []
     channel_map: dict[str, ChannelRecord] = {}
-    total = len(standalone) + len(groups)
+    total = len(post_groups)
     done = 0
     all_ids = [m.id for m in raw]
     id_range = f"{min(all_ids)}..{max(all_ids)}" if all_ids else "—"
 
-    for msg in standalone:
-        summary = await process_post(
-            client, channel_entity, channel, [msg], conn, channel_map,
-            media_dir, scrape_date, with_comments, with_media,
-        )
-        post_summaries.append(summary)
-        done += 1
-        _log_progress(done, total, f"msg {msg.id}", id_range)
-
-    for group in groups.values():
+    for group in post_groups:
         summary = await process_post(
             client, channel_entity, channel, group, conn, channel_map,
             media_dir, scrape_date, with_comments, with_media,
         )
         post_summaries.append(summary)
         done += 1
-        _log_progress(done, total, f"group {[m.id for m in group]}", id_range)
+        label = (
+            f"msg {group[0].id}"
+            if len(group) == 1
+            else f"group {sorted(m.id for m in group)}"
+        )
+        _log_progress(done, total, label, id_range)
 
     log.debug("resolving %d forwarding channels", len(channel_map))
     channel_summaries: list[dict] = []
@@ -775,6 +652,37 @@ async def _persist_messages(
     return post_summaries, channel_summaries
 
 
+async def ingest(
+    channel: str,
+    output_dir: Path,
+    session_file: str,
+    source,
+    with_comments: bool,
+    with_media: bool,
+    with_channel_info: bool,
+) -> None:
+    """Shared run lifecycle behind `scrape` and `fetch`.
+
+    Opens the DB, connects, pulls messages via `source(client, entity)`,
+    persists them, and prints the summary. The two commands differ only in
+    their message-source adapter."""
+    scrape_date = datetime.now(UTC).isoformat()
+    media_dir = output_dir / "media"
+
+    conn = open_db(output_dir, channel)
+    try:
+        async with channel_session(session_file, channel) as (client, entity):
+            raw = await source(client, entity)
+            post_summaries, channel_summaries = await _persist_messages(
+                client, entity, channel, raw, conn, media_dir,
+                scrape_date, with_comments, with_media, with_channel_info,
+            )
+    finally:
+        conn.close()
+
+    summarize_scrape(channel, post_summaries, channel_summaries)
+
+
 async def scrape(
     channel: str,
     output_dir: Path,
@@ -787,9 +695,6 @@ async def scrape(
     with_media: bool = True,
     with_channel_info: bool = True,
 ) -> None:
-    scrape_date = datetime.now(UTC).isoformat()
-    media_dir = output_dir / "media"
-
     # `--latest N` flips iteration to newest-first to actually return the
     # most recent N posts. `--limit N` alone keeps the chronological
     # (oldest-first) walk, which is what you want when paging forward from
@@ -806,15 +711,9 @@ async def scrape(
         iter_offset_id = offset_id - 1 if offset_id else 0
         iter_offset_date = offset_date
 
-    conn = open_db(output_dir, channel)
-    client = make_client(session_file)
-    await client.start(phone=PHONE)
-
-    try:
-        channel_entity = await client.get_entity(channel)
+    async def source(client: TelegramClient, entity) -> list[Message]:
         log.info("authenticated, scraping %s", channel)
-
-        raw: list[Message] = [
+        raw = [
             msg
             async for msg in client.iter_messages(
                 channel,
@@ -825,18 +724,12 @@ async def scrape(
             )
         ]
         log.info("fetched %d messages", len(raw))
+        return raw
 
-        post_summaries, channel_summaries = await _persist_messages(
-            client, channel_entity, channel, raw, conn, media_dir,
-            scrape_date, with_comments, with_media, with_channel_info,
-        )
-
-        db_path = db_path_for(output_dir, channel)
-    finally:
-        await client.disconnect()
-        conn.close()
-
-    summarize_scrape(channel, post_summaries, channel_summaries, db_path)
+    await ingest(
+        channel, output_dir, session_file, source,
+        with_comments, with_media, with_channel_info,
+    )
 
 
 async def fetch_by_ids(
@@ -848,19 +741,10 @@ async def fetch_by_ids(
     with_media: bool = True,
     with_channel_info: bool = True,
 ) -> None:
-    scrape_date = datetime.now(UTC).isoformat()
-    media_dir = output_dir / "media"
-
-    conn = open_db(output_dir, channel)
-    client = make_client(session_file)
-    await client.start(phone=PHONE)
-
-    try:
-        channel_entity = await client.get_entity(channel)
+    async def source(client: TelegramClient, entity) -> list[Message]:
         log.info("authenticated, fetching %d post(s) from %s", len(post_ids), channel)
-
         # get_messages returns a parallel list; entries are None for missing ids.
-        fetched = await client.get_messages(channel_entity, ids=post_ids)
+        fetched = await client.get_messages(entity, ids=post_ids)
         raw: list[Message] = []
         missing: list[int] = []
         for req_id, msg in zip(post_ids, fetched):
@@ -871,139 +755,12 @@ async def fetch_by_ids(
         if missing:
             log.warning("not found in channel: %s", missing)
         log.info("resolved %d/%d post(s)", len(raw), len(post_ids))
+        return raw
 
-        post_summaries, channel_summaries = await _persist_messages(
-            client, channel_entity, channel, raw, conn, media_dir,
-            scrape_date, with_comments, with_media, with_channel_info,
-        )
-
-        db_path = db_path_for(output_dir, channel)
-    finally:
-        await client.disconnect()
-        conn.close()
-
-    summarize_scrape(channel, post_summaries, channel_summaries, db_path)
-
-
-def _text_snippet(text: str | None, length: int = 80) -> str:
-    return " ".join((text or "").split())[:length]
-
-
-def _md_cell(text: str | None) -> str:
-    """Snippet safe for a Markdown table cell - escape pipes, drop newlines."""
-    return _text_snippet(text).replace("|", "\\|") or "—"
-
-
-def summarize_scrape(
-    channel: str, posts: list[dict], channels: list[dict], db_path: Path
-) -> None:
-    """Print an LLM-oriented summary of a scrape run to stdout."""
-    print(f"\n# Scrape summary: {channel}\n")
-    if not posts:
-        print("No posts fetched.")
-        return
-
-    dates = sorted(p["date"] for p in posts if p.get("date"))
-    n = len(posts)
-    views = sum(p.get("views") or 0 for p in posts)
-    forwards = sum(p.get("forwards") or 0 for p in posts)
-    reactions = sum(p.get("reactions") or 0 for p in posts)
-    comments = sum(p.get("comments_count") or 0 for p in posts)
-
-    # Outward forwarders only (channels that re-shared our posts). Inward
-    # sources we forwarded from are registered into the same channel_map for
-    # `public_channels` persistence but carry no `shared_posts`, so filter.
-    forwarders = [c for c in channels if c.get("shared_posts")]
-
-    print("## Overview\n")
-    span = f"  ({dates[0][:10]} → {dates[-1][:10]})" if dates else ""
-    print(f"- Posts: {n}{span}")
-    print(f"- Views: {views:,}  (avg {views // n:,}/post)")
-    print(f"- Reactions: {reactions:,}   Comments: {comments:,}   "
-          f"Forwards of your posts: {forwards:,}")
-    print(f"- Your posts re-shared by: {len(forwarders)} other channels")
-
-    # One combined ranking, sorted by views, with reactions alongside - half
-    # the lines of two separate tables and both signals visible at once.
-    top = sorted(posts, key=lambda p: p.get("views") or 0, reverse=True)[:10]
-    print("\n## Top posts\n")
-    print("| Views | Reactions | Post | Snippet |")
-    print("|------:|----------:|------|---------|")
-    for p in top:
-        print(
-            f"| {p.get('views') or 0:,} | {p.get('reactions') or 0:,} "
-            f"| {p['link']} | {_md_cell(p.get('text'))} |"
-        )
-
-    if forwarders:
-        # Group by post (not by channel): for each of our posts that got
-        # re-shared, list the channels that shared it. Inverts the
-        # forwarder->posts mapping we already have - no extra API calls.
-        post_by_id = {p["id"]: p for p in posts}
-        shares_by_post: dict[int, list[dict]] = {}
-        for c in forwarders:
-            for pid in c["shared_posts"]:
-                shares_by_post.setdefault(pid, []).append(c)
-        total_shares = sum(len(chs) for chs in shares_by_post.values())
-        # Direction matters and gets confused easily: this section is OTHERS
-        # re-sharing US. The opposite direction (our channel reposting others)
-        # is the "YOUR reposts" section below. Spell it out in the headings.
-        print(
-            f"\n## Who re-shared YOUR posts "
-            f"({len(shares_by_post)} of your posts re-shared, "
-            f"{total_shares} shares by {len(forwarders)} other channels)\n"
-        )
-        print(
-            "Direction: OTHER channels forwarded YOUR content (your reach). "
-            "Each of your posts below was re-shared by the listed channels. "
-            "`subs` is each channel's size (the audience that share reached).\n"
-        )
-        for pid in sorted(shares_by_post, reverse=True):
-            chans = sorted(
-                shares_by_post[pid],
-                key=lambda c: c.get("subscribers") or 0,
-                reverse=True,
-            )
-            p = post_by_id.get(pid)
-            if p is not None:
-                views = p.get("views")
-                views_str = f"{views:,} views" if views is not None else "views n/a"
-                print(f"### #{pid} ({views_str}) — {p['link']}")
-                snippet = _text_snippet(p.get("text"))
-                if snippet:
-                    print(f'"{snippet}"')
-            else:
-                # Re-shared post is outside this scrape's window; id only.
-                print(f"### #{pid}")
-            for c in chans:
-                subs = c.get("subscribers")
-                subs_str = f"{subs:,} subs" if subs is not None else "subs n/a"
-                name = c.get("name") or c["link"]
-                print(f"- {name} ({subs_str}) — {c['link']}")
-            print()
-
-    # Our posts that forward/cite another channel — one row per post, newest
-    # first. Source channel name/subs joined from `channels`.
-    cited_posts = [p for p in posts if p.get("forwarder_from_channel")]
-    if cited_posts:
-        by_link = {c["link"]: c for c in channels}
-        print("\n## YOUR reposts of OTHER channels (not your original content)\n")
-        print(
-            "Direction: YOUR channel forwarded SOMEONE ELSE's content — the "
-            "opposite of the re-shares section above.\n"
-        )
-        print("| Post | Snippet | Reposted from |")
-        print("|------|---------|---------------|")
-        for p in sorted(cited_posts, key=lambda p: p["id"], reverse=True):
-            link = p["forwarder_from_channel"]
-            info = by_link.get(link, {})
-            name = info.get("name") or link
-            subs = info.get("subscribers")
-            subs_str = f"{subs:,} subs" if subs else "subs n/a"
-            print(
-                f"| {p['link']} | {_md_cell(p.get('text'))} "
-                f"| {name} ({subs_str}) {link} |"
-            )
+    await ingest(
+        channel, output_dir, session_file, source,
+        with_comments, with_media, with_channel_info,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1046,25 +803,24 @@ def match_series(series: dict[str, list], *keywords: str) -> list | None:
     return None
 
 
-async def open_stats(channel: str, session_file: str):
-    """Connect, resolve the channel and fetch its BroadcastStats."""
-    client = make_client(session_file)
-    await client.start(phone=PHONE)
+@asynccontextmanager
+async def stats_session(channel: str, session_file: str):
+    """Connected client + the channel's BroadcastStats, lifecycle owned here.
 
-    channel_entity = await client.get_entity(channel)
-    log.info("authenticated, fetching stats for %s", channel)
-
-    try:
-        stats = await client(GetBroadcastStatsRequest(channel=channel_entity))
-    except Exception as e:
-        log.error(
-            "failed to get stats (%s) - you must be an admin of a channel that is "
-            "large enough for Telegram to compute statistics",
-            e,
-        )
-        await client.disconnect()
-        raise typer.Exit(code=1)
-    return client, stats
+    Replaces the old `open_stats`, which handed a live client across the seam
+    for the caller to remember to disconnect."""
+    async with channel_session(session_file, channel) as (client, entity):
+        log.info("authenticated, fetching stats for %s", channel)
+        try:
+            stats = await client(GetBroadcastStatsRequest(channel=entity))
+        except Exception as e:
+            log.error(
+                "failed to get stats (%s) - you must be an admin of a channel "
+                "that is large enough for Telegram to compute statistics",
+                e,
+            )
+            raise typer.Exit(code=1)
+        yield client, stats
 
 
 def ms_to_date(ts_ms) -> str:
@@ -1074,12 +830,10 @@ def ms_to_date(ts_ms) -> str:
 async def fetch_subscribers(
     channel: str, output_dir: Path, session_file: str
 ) -> None:
-    client, stats = await open_stats(channel, session_file)
-
-    followers = await load_graph(client, stats.followers_graph)
-    growth = await load_graph(client, stats.growth_graph)
-    sources = await load_graph(client, stats.new_followers_by_source_graph)
-    await client.disconnect()
+    async with stats_session(channel, session_file) as (client, stats):
+        followers = await load_graph(client, stats.followers_graph)
+        growth = await load_graph(client, stats.growth_graph)
+        sources = await load_graph(client, stats.new_followers_by_source_graph)
 
     if not followers:
         log.error("no followers graph available for this channel")
@@ -1143,15 +897,14 @@ async def fetch_subscribers(
         conn.commit()
         rows = _load_subscriber_rows(conn)
 
-    db_path = db_path_for(output_dir, channel)
     log.info(
         "stored %d daily rows, %d source rows in %s",
         len(base_rows),
         len(source_rows),
-        db_path,
+        db_path_for(output_dir, channel),
     )
 
-    summarize_subscribers(channel, rows, db_path)
+    summarize_subscribers(channel, rows)
 
 
 def _load_subscriber_rows(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -1175,58 +928,29 @@ def _load_subscriber_rows(conn: sqlite3.Connection) -> dict[str, dict]:
     return rows
 
 
-def _as_number(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+async def fetch_views_by_hour(channel: str, session_file: str) -> None:
+    async with stats_session(channel, session_file) as (client, stats):
+        graph = await load_graph(client, stats.top_hours_graph)
+        period = stats.period
 
+    if not graph:
+        log.error("no top-hours graph available for this channel")
+        raise typer.Exit(code=1)
 
-def summarize_subscribers(
-    channel: str, rows: dict[str, dict], db_path: Path
-) -> None:
-    """Print an LLM-oriented summary of subscriber dynamics to stdout."""
-    print(f"\n# Subscriber summary: {channel}\n")
-    dates = sorted(rows)
-    if not dates:
-        print("No subscriber data.")
-        return
-
-    joins = sum(_as_number(rows[d].get("joins")) for d in dates)
-    leaves = sum(_as_number(rows[d].get("leaves")) for d in dates)
-    first_total = _as_number(rows[dates[0]].get("total"))
-    last_total = _as_number(rows[dates[-1]].get("total"))
-    days = len(dates)
-
-    print(f"- Date range: {dates[0]} -> {dates[-1]} ({days} days)")
-    print(f"- Current total subscribers: {int(last_total):,}")
-    print(
-        f"- Net change over period: {int(last_total - first_total):+,} "
-        f"(from {int(first_total):,})"
-    )
-    print(
-        f"- Total joins: {int(joins):,} | total leaves: {int(leaves):,} "
-        f"| net: {int(joins - leaves):+,}"
-    )
-    print(f"- Avg per day: {joins / days:.1f} joins, {leaves / days:.1f} leaves")
-
-    best = max(dates, key=lambda d: _as_number(rows[d].get("joins")))
-    worst = max(dates, key=lambda d: _as_number(rows[d].get("leaves")))
-    print(f"- Best day: {best} (+{int(_as_number(rows[best].get('joins')))} joins)")
-    print(
-        f"- Worst day: {worst} "
-        f"(-{int(_as_number(rows[worst].get('leaves')))} leaves)"
+    hours, series = graph_series(graph)
+    views = next(iter(series.values()), [])
+    summarize_views(
+        channel,
+        hours,
+        views,
+        period.min_date.date().isoformat(),
+        period.max_date.date().isoformat(),
     )
 
-    source_totals: Counter = Counter()
-    for d in dates:
-        for source, count in rows[d].get("sources", {}).items():
-            source_totals[source] += _as_number(count)
-    if source_totals:
-        print("\n## New subscribers by source (period total)\n")
-        grand = sum(source_totals.values()) or 1
-        for source, value in source_totals.most_common():
-            print(f"- {source}: {int(value):,} ({value / grand * 100:.1f}%)")
+
+# ---------------------------------------------------------------------------
+# Scheduled posts
+# ---------------------------------------------------------------------------
 
 
 async def fetch_scheduled(channel: str, session_file: str) -> None:
@@ -1241,15 +965,11 @@ async def fetch_scheduled(channel: str, session_file: str) -> None:
     the channel. Scheduled posts carry no views/forwards/reactions and their
     ids are *scheduled-message* ids (distinct from the id a post gets once
     published), so we don't persist them — this is a read-only peek."""
-    client = make_client(session_file)
-    await client.start(phone=PHONE)
-
-    try:
-        channel_entity = await client.get_entity(channel)
+    async with channel_session(session_file, channel) as (client, entity):
         log.info("authenticated, listing scheduled posts for %s", channel)
         try:
             result = await client(
-                GetScheduledHistoryRequest(peer=channel_entity, hash=0)
+                GetScheduledHistoryRequest(peer=entity, hash=0)
             )
         except Exception as e:
             log.error(
@@ -1261,20 +981,9 @@ async def fetch_scheduled(channel: str, session_file: str) -> None:
         raw: list[Message] = [
             m for m in getattr(result, "messages", []) if isinstance(m, Message)
         ]
-    finally:
-        await client.disconnect()
-
-    # Group albums by grouped_id so a multi-photo scheduled post counts once.
-    groups: dict[int, list[Message]] = {}
-    standalone: list[Message] = []
-    for msg in raw:
-        if msg.grouped_id:
-            groups.setdefault(msg.grouped_id, []).append(msg)
-        else:
-            standalone.append(msg)
 
     items: list[dict] = []
-    for group in (*([m] for m in standalone), *groups.values()):
+    for group in group_albums(raw):
         group.sort(key=lambda m: m.id)
         # Raw messages from GetScheduledHistory aren't client-bound, so the
         # `.text` property is None; the plain body lives in `.message`.
@@ -1318,121 +1027,6 @@ def _media_desc(msg: Message) -> str | None:
     return mt
 
 
-def _rel_when(iso: str | None, now: datetime) -> str:
-    """Coarse, agent-friendly delta from `now`, e.g. 'in ~3h' / 'overdue 10m'."""
-    if not iso:
-        return "no date"
-    try:
-        dt = datetime.fromisoformat(iso)
-    except ValueError:
-        return "unknown"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    secs = (dt - now).total_seconds()
-    overdue = secs < 0
-    secs = abs(secs)
-    if secs < 3600:
-        mag = f"{int(secs // 60)}m"
-    elif secs < 86400:
-        mag = f"{int(secs // 3600)}h"
-    else:
-        mag = f"{int(secs // 86400)}d"
-    return f"overdue {mag}" if overdue else f"in ~{mag}"
-
-
-def summarize_scheduled(channel: str, items: list[dict]) -> None:
-    """Print the scheduled-post queue to stdout, one block per post."""
-    print(f"\n# Scheduled posts: {channel}\n")
-    if not items:
-        print("No scheduled posts in the queue.")
-        return
-
-    now = datetime.now(UTC)
-    dates = [i["date"] for i in items if i.get("date")]
-    print("## Overview\n")
-    print(f"- Queued posts: {len(items)}")
-    if dates:
-        lo = dates[0][:16].replace("T", " ")
-        hi = dates[-1][:16].replace("T", " ")
-        print(f"- Window: {lo} → {hi} UTC")
-    print("- Times are UTC. Scheduled posts have no engagement metrics yet.")
-    print(
-        "- `sched-msg #` is the scheduled-message id, distinct from the id the "
-        "post gets once published.\n"
-    )
-
-    print("## Queue\n")
-    for n, i in enumerate(items, 1):
-        when = (i.get("date") or "")[:16].replace("T", " ") or "no date"
-        rel = _rel_when(i.get("date"), now)
-        print(f"### {n}. {when} UTC ({rel}) — sched-msg #{i['id']}\n")
-        body = (i.get("text") or "").strip()
-        if body:
-            print("Text:")
-            for line in body.splitlines():
-                print(f"> {line}")
-        else:
-            print("Text: (none)")
-        attachments = i.get("attachments") or []
-        if attachments:
-            print("\nAttachments:")
-            for a in attachments:
-                print(f"- {a}")
-        else:
-            print("\nAttachments: (none)")
-        print()
-
-
-async def fetch_views_by_hour(channel: str, session_file: str) -> None:
-    client, stats = await open_stats(channel, session_file)
-
-    graph = await load_graph(client, stats.top_hours_graph)
-    period = stats.period
-    await client.disconnect()
-
-    if not graph:
-        log.error("no top-hours graph available for this channel")
-        raise typer.Exit(code=1)
-
-    hours, series = graph_series(graph)
-    views = next(iter(series.values()), [])
-    summarize_views(channel, hours, views, period)
-
-
-def summarize_views(channel: str, hours: list, views: list, period) -> None:
-    """Print an LLM-oriented summary of views-per-hour to stdout."""
-    print(f"\n# Views by hour of day: {channel}\n")
-    pairs = [(int(h), _as_number(v)) for h, v in zip(hours, views)]
-    if not pairs:
-        print("No views-by-hour data.")
-        return
-
-    total = sum(v for _, v in pairs) or 1
-    ranked = sorted(pairs, key=lambda hv: hv[1], reverse=True)
-
-    print(
-        f"- Analyzed period: {period.min_date.date().isoformat()} -> "
-        f"{period.max_date.date().isoformat()}"
-    )
-    print(f"- Total views in sample: {int(total):,}")
-    print(
-        "- Hour is hour-of-day, 0-23, in the Telegram account's local "
-        "timezone (NOT UTC)."
-    )
-
-    print("\n## Peak hours\n")
-    for hour, value in ranked[:3]:
-        print(f"- {hour:02d}:00 | {int(value):,} views ({value / total * 100:.1f}%)")
-
-    print("\n## Quietest hours\n")
-    for hour, value in sorted(ranked[-3:]):
-        print(f"- {hour:02d}:00 | {int(value):,} views ({value / total * 100:.1f}%)")
-
-    print("\n## All hours\n")
-    for hour, value in sorted(pairs):
-        print(f"- {hour:02d}:00 | {int(value):,} views ({value / total * 100:.1f}%)")
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1440,19 +1034,56 @@ def summarize_views(channel: str, hours: list, views: list, period) -> None:
 
 app = typer.Typer(help="Scrape posts, forwards and comments from a Telegram channel.")
 
+# Shared option declarations — one home per flag's help text. Commands reuse
+# these aliases, so the CLI surface stays identical across commands by
+# construction instead of by copy-paste discipline.
+ChannelOpt = Annotated[
+    str, typer.Option(help="Telegram channel username (required).")
+]
+AdminChannelOpt = Annotated[
+    str,
+    typer.Option(help="Telegram channel username, required (you must be an admin)."),
+]
+PostRightsChannelOpt = Annotated[
+    str,
+    typer.Option(help="Telegram channel username, required (you need post rights)."),
+]
+OutputDirOpt = Annotated[
+    Path, typer.Option(help="Directory for the SQLite DB and downloaded media.")
+]
+SessionOpt = Annotated[str, typer.Option(help="Telethon session file name.")]
+CommentsOpt = Annotated[bool, typer.Option(help="Fetch post comments.")]
+MediaOpt = Annotated[bool, typer.Option(help="Download post media.")]
+ChannelInfoOpt = Annotated[
+    bool,
+    typer.Option(
+        help="Resolve detail info about outer public channels that forwarded posts."
+    ),
+]
+VerboseOpt = Annotated[
+    bool,
+    typer.Option(
+        "--verbose", "-v",
+        help="Per-post progress + Telethon network logs (otherwise every "
+        f"{PROGRESS_EVERY} posts).",
+    ),
+]
+DEFAULT_SESSION = str(DEFAULT_SESSION_FILE)
+
+
+def _prepare(session_file: str, verbose: bool = False) -> None:
+    """Shared command preamble: a session must exist; -v raises log verbosity."""
+    _require_session(session_file)
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("telethon").setLevel(logging.INFO)
+
 
 @app.command("scrape")
-def main(
-    channel: Annotated[
-        str, typer.Option(help="Telegram channel username to scrape (required).")
-    ],
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Directory for the SQLite DB and downloaded media."),
-    ] = DEFAULT_OUTPUT_DIR,
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
+def scrape_cmd(
+    channel: ChannelOpt,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    session_file: SessionOpt = DEFAULT_SESSION,
     limit: Annotated[
         int | None,
         typer.Option(
@@ -1482,34 +1113,13 @@ def main(
             "--limit/--offset-id/--offset-date."
         ),
     ] = None,
-    comments: Annotated[
-        bool,
-        typer.Option(help="Fetch post comments."),
-    ] = True,
-    media: Annotated[
-        bool,
-        typer.Option(help="Download post media."),
-    ] = True,
-    channel_info: Annotated[
-        bool,
-        typer.Option(
-            help="Resolve detail info about outer public channels that forwarded posts."
-        ),
-    ] = True,
-    verbose: Annotated[
-        bool,
-        typer.Option(
-            "--verbose", "-v",
-            help="Per-post progress + Telethon network logs (otherwise every "
-            f"{PROGRESS_EVERY} posts).",
-        ),
-    ] = False,
+    comments: CommentsOpt = True,
+    media: MediaOpt = True,
+    channel_info: ChannelInfoOpt = True,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Run the scraper."""
-    _require_session(session_file)
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("telethon").setLevel(logging.INFO)
+    _prepare(session_file, verbose)
     asyncio.run(
         scrape(
             channel,
@@ -1532,47 +1142,19 @@ def fetch_cmd(
         list[int],
         typer.Argument(help="One or more post ids, e.g. `fetch 103 105 108`."),
     ],
-    channel: Annotated[
-        str, typer.Option(help="Telegram channel username to fetch from (required).")
-    ],
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Directory for the SQLite DB and downloaded media."),
-    ] = DEFAULT_OUTPUT_DIR,
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
-    comments: Annotated[
-        bool,
-        typer.Option(help="Fetch post comments."),
-    ] = True,
-    media: Annotated[
-        bool,
-        typer.Option(help="Download post media."),
-    ] = True,
-    channel_info: Annotated[
-        bool,
-        typer.Option(
-            help="Resolve detail info about outer public channels that forwarded posts."
-        ),
-    ] = True,
-    verbose: Annotated[
-        bool,
-        typer.Option(
-            "--verbose", "-v",
-            help="Per-post progress + Telethon network logs (otherwise every "
-            f"{PROGRESS_EVERY} posts).",
-        ),
-    ] = False,
+    channel: ChannelOpt,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    session_file: SessionOpt = DEFAULT_SESSION,
+    comments: CommentsOpt = True,
+    media: MediaOpt = True,
+    channel_info: ChannelInfoOpt = True,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Fetch specific posts by id and persist them like `scrape` does.
 
     Useful for refreshing a known post or pulling a small set without
     iterating the whole channel history. Missing ids are logged and skipped."""
-    _require_session(session_file)
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("telethon").setLevel(logging.INFO)
+    _prepare(session_file, verbose)
     asyncio.run(
         fetch_by_ids(
             channel,
@@ -1588,69 +1170,43 @@ def fetch_cmd(
 
 @app.command("subscribers")
 def subscribers(
-    channel: Annotated[
-        str,
-        typer.Option(
-            help="Telegram channel username, required (you must be an admin)."
-        ),
-    ],
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Directory for the SQLite DB."),
-    ] = DEFAULT_OUTPUT_DIR,
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
+    channel: AdminChannelOpt,
+    output_dir: OutputDirOpt = DEFAULT_OUTPUT_DIR,
+    session_file: SessionOpt = DEFAULT_SESSION,
 ) -> None:
     """Export daily subscriber dynamics into the SQLite DB
     (subscribers + subscriber_sources tables)."""
-    _require_session(session_file)
+    _prepare(session_file)
     asyncio.run(fetch_subscribers(channel, output_dir, session_file))
 
 
 @app.command("views")
 def views(
-    channel: Annotated[
-        str,
-        typer.Option(
-            help="Telegram channel username, required (you must be an admin)."
-        ),
-    ],
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
+    channel: AdminChannelOpt,
+    session_file: SessionOpt = DEFAULT_SESSION,
 ) -> None:
     """Print views per hour of day to the console: hour|views."""
-    _require_session(session_file)
+    _prepare(session_file)
     asyncio.run(fetch_views_by_hour(channel, session_file))
 
 
 @app.command("scheduled")
 def scheduled(
-    channel: Annotated[
-        str,
-        typer.Option(
-            help="Telegram channel username, required (you need post rights)."
-        ),
-    ],
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
+    channel: PostRightsChannelOpt,
+    session_file: SessionOpt = DEFAULT_SESSION,
 ) -> None:
     """List the channel's scheduled (not-yet-published) posts to the console.
 
     Read-only — scheduled posts have no engagement yet and their ids differ
     from published ids, so nothing is persisted. Requires post rights on the
     channel."""
-    _require_session(session_file)
+    _prepare(session_file)
     asyncio.run(fetch_scheduled(channel, session_file))
 
 
 @app.command("login")
 def login(
-    session_file: Annotated[
-        str, typer.Option(help="Telethon session file name.")
-    ] = str(DEFAULT_SESSION_FILE),
+    session_file: SessionOpt = DEFAULT_SESSION,
 ) -> None:
     """One-time interactive Telegram auth.
 
@@ -1661,9 +1217,8 @@ def login(
     Path(session_file).parent.mkdir(parents=True, exist_ok=True)
 
     async def _go() -> None:
-        client = make_client(session_file)
-        await client.start(phone=PHONE)
-        await client.disconnect()
+        async with channel_session(session_file):
+            pass
 
     asyncio.run(_go())
     typer.echo(f"Saved Telegram session to {session_file}")

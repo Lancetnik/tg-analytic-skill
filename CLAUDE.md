@@ -8,9 +8,17 @@ drives. Distributed via the `skills` npm CLI (`npx skills@latest add ...`).
 
 - `skills/tg-analytic-skill/` — the skill itself (read-only when installed).
   - `SKILL.md` — instructions Claude follows. Update it whenever commands change.
-  - `scripts/tg_scrape.py` — the Telegram-facing CLI (Telethon). One file, ~1500 lines.
+  - `scripts/tg_scrape.py` — the Telegram-facing CLI (Telethon).
   - `scripts/tg_query.py` — read-only SQL CLI over the per-channel SQLite DB.
-  - `references/schema.md` — source-of-truth DB schema doc; read before writing SQL.
+  - `scripts/_common.py` — shared paths, the `SCHEMA` constant (**source of
+    truth** for the DB layout), and DB open helpers. Stdlib-only so
+    `tg_query.py` keeps its empty-dependencies property.
+  - `scripts/_render.py` — pure-presentation Markdown renderers (`summarize_*`);
+    plain dicts in, stdout out — no Telethon or SQLite types.
+  - `scripts/check_schema_doc.py` — drift guard; run after editing `SCHEMA` or
+    `references/schema.md`.
+  - `references/schema.md` — restates `SCHEMA` for the SQL-writing agent; read
+    before writing SQL.
   - `.env.example` — template for the 3 credentials.
 - `.tg-analytic/` — **runtime state at the project root** (cwd), gitignored:
   `.env`, `session.session`, one `<channel>.db` per channel, `media/`. The
@@ -18,7 +26,9 @@ drives. Distributed via the `skills` npm CLI (`npx skills@latest add ...`).
 
 ## Stack
 
-- Python ≥3.11, run via `uv run` (PEP-723 inline deps in each script header).
+- Python ≥3.10, run via `uv run` (PEP-723 inline deps in each script header).
+  Same-directory imports (`_common`, `_render`) resolve because the script's
+  own directory is on `sys.path`.
 - **Telethon** (`>=1.36,<2`) — Telegram client API (not the bot API). Auth = a
   `session.session` file from a one-time interactive `login` (needs a TTY for
   the SMS code, so it can't run via the Bash tool — tell the user to run it).

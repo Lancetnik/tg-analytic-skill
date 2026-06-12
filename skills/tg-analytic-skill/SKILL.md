@@ -71,16 +71,6 @@ uv run skills/tg-analytic-skill/scripts/tg_scrape.py login
 
 **in their own terminal** (not via you), from the project root — Telethon prompts on stdin for an SMS code and a 2FA password if enabled, which only works in an interactive TTY. Once it writes `.tg-analytic/session.session`, re-run the original command.
 
-### Running inside a domain-allowlist sandbox
-
-Telethon connects to Telegram's data centers by **fixed IP**, so a sandbox that only allows an explicit set of **domains** blocks it (the connection never reaches a hostname the allowlist can match). To run under such a sandbox, set `TG_DC_DNS_SUFFIX` in `.tg-analytic/.env` to a wildcard-DNS domain where `<ip>.<suffix>` resolves to `<ip>`:
-
-```
-TG_DC_DNS_SUFFIX=nip.io      # or sslip.io, or your own wildcard DNS
-```
-
-The script then dials each DC as `<dc-ip>.<suffix>` (e.g. `149.154.167.51.nip.io`) — a hostname that resolves straight back to the real MTProto IP — so you only need to **allowlist that one domain** (`nip.io`) in the sandbox. Unset, the script connects by raw IP exactly as before. Note `*.web.telegram.org` does **not** work here — those serve WebSocket only, which Telethon can't speak. `login` should still be run in a real terminal regardless.
-
 ## CLIs
 
 Two CLIs under `skills/tg-analytic-skill/scripts/`:

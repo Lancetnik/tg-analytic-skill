@@ -112,8 +112,17 @@ Full command reference lives in [`skills/tg-analytic-skill/SKILL.md`](./skills/t
 skills/
   tg-analytic-skill/
     SKILL.md          Skill instructions (frontmatter + body).
+    .env.example      Template for the three Telegram credentials.
     scripts/
-      tg_scrape.py    Telethon-based CLI (scrape, fetch, subscribers, views).
-      tg_query.py     Stdlib-only read-only SQL CLI.
-    data/             Empty placeholder; user-specific DBs live here at runtime.
+      tg_scrape.py           Telethon-based CLI (scrape, fetch, subscribers, views).
+      tg_query.py            Stdlib-only read-only SQL CLI.
+      _common.py             Shared paths, DB schema (source of truth), open helpers.
+      _render.py             Markdown renderers for the per-command summaries.
+      check_schema_doc.py    Guard against SCHEMA <-> references/schema.md drift.
+    references/
+      schema.md       DB schema reference for writing SQL.
 ```
+
+Runtime state (`.env`, the Telethon session, per-channel `*.db` files, media)
+lives in a gitignored `.tg-analytic/` directory at the root of whatever
+project you run the skill from — nothing is written inside the skill itself.
