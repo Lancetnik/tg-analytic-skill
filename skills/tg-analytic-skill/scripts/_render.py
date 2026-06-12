@@ -400,10 +400,11 @@ def summarize_group(
         print("| Author | Messages | Reactions received |")
         print("|--------|---------:|-------------------:|")
         for author, n in per_author.most_common(10):
-            print(f"| {author} | {n} | {reacts[author]} |")
+            # `author` is None for anonymous senders — don't print "None".
+            print(f"| {author or 'anonymous'} | {n} | {reacts[author]} |")
         days = len({(m.get("date") or "")[:10] for m in own if m.get("date")}) or 1
         print(f"\n- Avg messages/day: {len(own) / days:.1f}")
         top = max(own, key=lambda m: m.get("reactions") or 0)
         if top.get("reactions"):
             print(f"- Most-reacted message: {top['reactions']} reactions — "
-                  f"{top.get('author')}: \"{_md_cell(top.get('text'))}\"")
+                  f"{top.get('author') or 'anonymous'}: \"{_md_cell(top.get('text'))}\"")
