@@ -365,8 +365,14 @@ CREATE TABLE group_events (
 );
 ```
 
-- `id` — service-message id. PK is `(id, user_id)`: one add-user service
-  message can add several users.
+- Rows come from **two sources**, deduped on insert: service messages in
+  the group history, and (when the scanning account is a group admin) the
+  group's **admin log** — which records joins Telegram suppressed or
+  deleted from history, e.g. CTA join bursts. Don't try to join `id` to
+  `group_messages.id`: admin-log event ids live in a separate, much larger
+  id space than message ids.
+- `id` — service-message id or admin-log event id. PK is `(id, user_id)`:
+  one add-user service message can add several users.
 - `kind` — `join` | `leave`.
 - `via` — joins: `link` (invite/CTA link) | `request` (approved join
   request) | `added` (added by a member, **or** the group's Join button —
@@ -375,8 +381,10 @@ CREATE TABLE group_events (
   `unknown` (no actor on the service message — e.g. deleted accounts
   auto-removed by Telegram). Don't fold `unknown` into either bucket when
   reporting churn.
-- Completeness caveat: Telegram suppresses join/leave service messages in
-  very large groups — cross-check against `group_metrics.members`.
+- Completeness caveat: the admin log only retains ~48h, and without admin
+  rights only service messages are available (Telegram suppresses those
+  during join bursts and in very large groups) — so the series is only as
+  complete as the scan cadence. Cross-check against `group_metrics.members`.
 
 ## `group_metrics` — append-only snapshots
 

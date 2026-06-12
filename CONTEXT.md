@@ -39,10 +39,12 @@ Group messages outside any thread (no originating post).
 _Avoid_: general messages, off-topic
 
 **Join event**:
-A dated service message in the discussion group recording a user joining
-(by link, by request approval, or added by a member).
+A dated record of a user joining the discussion group (by link, by request
+approval, or added by a member / Join button). Sourced from service
+messages, or from the group's admin log when scanning as an admin —
+Telegram suppresses service messages during join bursts.
 
 **Leave event**:
-A dated service message recording a user leaving the discussion group —
-self-leave, removed by an admin, or actor unknown (Telegram omits the
-actor e.g. when auto-removing deleted accounts).
+A dated record of a user leaving the discussion group — self-leave,
+removed by an admin, or actor unknown (Telegram omits the actor e.g. when
+auto-removing deleted accounts). Same two sources as Join event.

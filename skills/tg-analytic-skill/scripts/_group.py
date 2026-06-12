@@ -66,6 +66,49 @@ def classify_service_message(msg) -> list[GroupEvent]:
     return []
 
 
+def classify_admin_log_event(ev) -> list[GroupEvent]:
+    """Map one admin-log event to membership events.
+
+    The admin log records joins/leaves that Telegram never wrote (or later
+    deleted) as service messages — CTA join bursts get suppressed wholesale,
+    so for an admin account this is the authoritative source. Same `via`
+    vocabulary as classify_service_message. Admin-log event ids live in a
+    separate, much larger id space than message ids, so the (id, user_id)
+    PK can't collide with service-message events."""
+    action = getattr(ev, "action", None)
+    if action is None:
+        return []
+    name = type(action).__name__
+    date = _iso(ev)
+    actor = getattr(ev, "user_id", None)
+    if name == "ChannelAdminLogEventActionParticipantJoin":
+        # Self-join via the public Join button — same bucket the service
+        # path uses for AddUser(self).
+        return [GroupEvent(ev.id, date, "join", "added", actor)]
+    if name == "ChannelAdminLogEventActionParticipantJoinByInvite":
+        return [GroupEvent(ev.id, date, "join", "link", actor)]
+    if name == "ChannelAdminLogEventActionParticipantJoinByRequest":
+        return [GroupEvent(ev.id, date, "join", "request", actor)]
+    if name == "ChannelAdminLogEventActionParticipantInvite":
+        # The subject is the invited participant, not the acting member.
+        uid = getattr(getattr(action, "participant", None), "user_id", None)
+        return [GroupEvent(ev.id, date, "join", "added", uid)] if uid else []
+    if name == "ChannelAdminLogEventActionParticipantLeave":
+        return [GroupEvent(ev.id, date, "leave", "self", actor)]
+    if name == "ChannelAdminLogEventActionParticipantToggleBan":
+        # Only a ban that ejects the member counts as a leave; rights-only
+        # restrictions keep them in the group.
+        new = getattr(action, "new_participant", None)
+        if type(new).__name__ == "ChannelParticipantBanned" and getattr(
+            new, "left", False
+        ):
+            uid = getattr(getattr(new, "peer", None), "user_id", None)
+            if uid is not None:
+                return [GroupEvent(ev.id, date, "leave", "removed", uid)]
+        return []
+    return []
+
+
 def auto_forward_post_id(msg, channel_id: int | None) -> int | None:
     """Channel post id if `msg` is the auto-forward of a channel post (a
     thread root); None otherwise.

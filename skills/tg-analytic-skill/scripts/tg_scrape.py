@@ -21,7 +21,10 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.channels import (
+    GetAdminLogRequest,
+    GetFullChannelRequest,
+)
 from telethon.tl.functions.messages import GetScheduledHistoryRequest
 from telethon.tl.functions.stats import (
     GetBroadcastStatsRequest,
@@ -29,6 +32,7 @@ from telethon.tl.functions.stats import (
     LoadAsyncGraphRequest,
 )
 from telethon.tl.types import (
+    ChannelAdminLogEventsFilter,
     Message,
     MessageMediaDocument,
     MessageMediaPhoto,
@@ -44,6 +48,7 @@ from _common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
 from _group import (
     GroupEvent,
     auto_forward_post_id,
+    classify_admin_log_event,
     classify_service_message,
     thread_post_id_for,
     unresolved_root_refs,
@@ -1176,6 +1181,107 @@ def insert_group_metrics(
     )
 
 
+async def _fetch_admin_log_events(
+    client: TelegramClient, entity
+) -> tuple[list[GroupEvent], dict[int, tuple[str | None, str | None]]]:
+    """Joins/leaves from the group's admin log (~48h retention), plus the
+    subjects' (name, username) from the log's own user objects.
+
+    The log records membership changes even when Telegram suppresses or
+    deletes the corresponding service messages — which is exactly what
+    happens to CTA join bursts — so for an admin account it is the
+    authoritative join source. Requires admin; degrades to empty with a
+    notice otherwise."""
+    events_filter = ChannelAdminLogEventsFilter(
+        join=True, leave=True, invite=True, ban=True, unban=False,
+        kick=True, unkick=False, promote=False, demote=False, info=False,
+        settings=False, pinned=False, edit=False, delete=False,
+        group_call=False, invites=False, send=False, forums=False,
+    )
+    events: list[GroupEvent] = []
+    users: dict[int, tuple[str | None, str | None]] = {}
+    max_id = 0
+    try:
+        while True:
+            res = await client(
+                GetAdminLogRequest(
+                    channel=entity, q="", max_id=max_id, min_id=0,
+                    limit=100, events_filter=events_filter,
+                )
+            )
+            if not res.events:
+                break
+            for ev in res.events:
+                events.extend(classify_admin_log_event(ev))
+            for u in res.users:
+                first = getattr(u, "first_name", "") or ""
+                last = getattr(u, "last_name", "") or ""
+                users[u.id] = (
+                    (first + " " + last).strip() or None,
+                    getattr(u, "username", None),
+                )
+            max_id = res.events[-1].id
+    except Exception as e:
+        log.info(
+            "admin log unavailable (admin rights needed) - joins/leaves "
+            "rely on service messages only (%s)", e,
+        )
+        return [], {}
+    if events:
+        log.info(
+            "admin log: %d membership event(s) (~48h retention - run "
+            "`group` at least every 2 days to keep the series complete)",
+            len(events),
+        )
+    return events, users
+
+
+def _dedupe_admin_events(
+    conn: sqlite3.Connection,
+    admin_events: list[GroupEvent],
+    service_events: list[GroupEvent],
+) -> list[GroupEvent]:
+    """Drop admin-log events already captured as service messages.
+
+    The same join can appear in both sources under unrelated ids, so the
+    (id, user_id) PK can't dedupe across them — match on (user_id, kind)
+    within a 10-minute window instead, against both this run's service
+    events and rows from earlier runs."""
+
+    def near(a: str | None, b: str | None) -> bool:
+        if not a or not b:
+            return False
+        try:
+            da, db = datetime.fromisoformat(a), datetime.fromisoformat(b)
+        except ValueError:
+            return False
+        return abs((da - db).total_seconds()) <= 600
+
+    kept = []
+    for e in admin_events:
+        if any(
+            s.user_id == e.user_id and s.kind == e.kind and near(s.date, e.date)
+            for s in service_events
+        ):
+            continue
+        row = conn.execute(
+            """
+            SELECT 1 FROM group_events
+            WHERE user_id = ? AND kind = ? AND id != ?
+              AND abs(strftime('%s', datetime(date))
+                      - strftime('%s', datetime(?))) <= 600
+            LIMIT 1
+            """,
+            (e.user_id, e.kind, e.id, e.date),
+        ).fetchone()
+        if row is None:
+            kept.append(e)
+    dropped = len(admin_events) - len(kept)
+    if dropped:
+        log.debug("admin log: %d duplicate event(s) skipped", dropped)
+    return kept
+
+
 async def _resolve_event_users(
     client: TelegramClient, events: list[GroupEvent]
 ) -> dict[int, tuple[str | None, str | None]]:
@@ -1316,7 +1422,20 @@ async def scan_group(
             scanned_ids = [m.id for m in raw]
 
             events = [e for m in service for e in classify_service_message(m)]
-            users = await _resolve_event_users(client, events)
+            admin_events, users = await _fetch_admin_log_events(
+                client, target.entity
+            )
+            if admin_events:
+                events.extend(
+                    _dedupe_admin_events(conn, admin_events, events)
+                )
+            # Admin-log responses carry the subjects' user objects; only
+            # resolve the (rare) uids the log didn't cover.
+            unresolved = [
+                e for e in events
+                if e.user_id is not None and e.user_id not in users
+            ]
+            users.update(await _resolve_event_users(client, unresolved))
 
             root_map = {
                 m.id: pid

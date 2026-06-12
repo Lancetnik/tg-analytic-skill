@@ -172,8 +172,17 @@ standalone and writes to a separate DB, divorced from the channel's posts
 Scans group history into three tables: `group_messages` (every non-service
 message, comments included — see the overlap rule in
 [references/schema.md](references/schema.md)), `group_events` (joins/leaves
-from service messages — needs only membership, **not** admin), and an
-append-only `group_metrics` member-count snapshot per run.
+— needs only membership, **not** admin), and an append-only
+`group_metrics` member-count snapshot per run.
+
+Join/leave events come from **two sources**: service messages in the group
+history (any member can see these), plus — when the account is an **admin**
+of the group — the group's admin log, which records every membership change
+even when Telegram suppresses or deletes the service messages (it does,
+wholesale, during join bursts — e.g. after a CTA post). The two sources are
+deduped automatically. **The admin log only retains ~48 hours**, so to keep
+the join series complete, run `group` at least every 2 days; without admin
+rights the command logs a notice and falls back to service messages alone.
 
 Selection flags are the same four as `scrape` (the table above applies:
 default to `--latest N`, never bare `--limit`). Incremental refresh:
@@ -188,10 +197,11 @@ contributors. CTA-attribution ("did post #X's invite work?") is
 deliberately NOT pre-computed — use the canonical query in
 references/schema.md with the user's chosen window.
 
-Completeness caveat: Telegram suppresses join/leave service messages in
-very large groups. The summary's event counts are what the scan *found*;
-cross-check against the `group_metrics.members` trend before claiming
-totals.
+Completeness caveat: without admin rights, event counts depend on service
+messages, which Telegram suppresses during join bursts and in very large
+groups — the summary's counts are what the scan *found*. Cross-check
+against the `group_metrics.members` trend before claiming totals (note
+that Telegram's own member count can lag a burst by hours).
 
 ## Other commands
 
