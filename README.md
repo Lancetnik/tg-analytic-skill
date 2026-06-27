@@ -120,12 +120,18 @@ skills/
     SKILL.md          Skill instructions (frontmatter + body).
     .env.example      Template for the three Telegram credentials.
     scripts/
-      tg_scrape.py           Telethon-based CLI (scrape, fetch, subscribers, views).
+      tg_scrape.py           Telethon read CLI (scrape, fetch, group, subscribers, views, scheduled).
+      tg_publish.py          Telethon write CLI (schedule, reschedule, edit).
       tg_query.py            Stdlib-only read-only SQL CLI.
-      _common.py             Shared paths, DB schema (source of truth), open helpers.
-      _render.py             Markdown renderers for the per-command summaries.
+      utils/                 Support package imported by the CLIs as `utils.*`:
+        _common.py             Shared paths, DB schema (source of truth), open helpers.
+        _tg.py                 Telethon session/credential plumbing.
+        _render.py             Markdown renderers for the per-command summaries.
+        _md2entities.py        Markdown -> Telethon MessageEntity (tg_publish).
+        _group.py              Discussion-group classification helpers.
     references/
       schema.md       DB schema reference for writing SQL.
+      markup.md       Supported Markdown -> Telegram markup for tg_publish.
 tools/
   check_schema_doc.py  Dev-only: guard SCHEMA <-> references/schema.md drift (not shipped).
 ```

@@ -10,7 +10,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-from _common import DEFAULT_OUTPUT_DIR, db_path_for
+from utils._common import DEFAULT_OUTPUT_DIR, db_path_for
 
 logging.basicConfig(
     level=logging.INFO,

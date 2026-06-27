@@ -43,9 +43,9 @@ from telethon.tl.types import (
     StatsGraphAsync,
 )
 
-from _common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
-from _tg import DEFAULT_SESSION, _require_session, channel_session
-from _group import (
+from utils._common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
+from utils._tg import DEFAULT_SESSION, _require_session, channel_session
+from utils._group import (
     GroupEvent,
     auto_forward_post_id,
     classify_admin_log_event,
@@ -53,7 +53,7 @@ from _group import (
     thread_post_id_for,
     unresolved_root_refs,
 )
-from _render import (
+from utils._render import (
     summarize_group,
     summarize_scheduled,
     summarize_scrape,

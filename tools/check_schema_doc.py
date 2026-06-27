@@ -27,7 +27,7 @@ SKILL_SCRIPTS = (
     / "skills" / "tg-analytic-skill" / "scripts"
 )
 sys.path.insert(0, str(SKILL_SCRIPTS))
-from _common import SCHEMA  # noqa: E402
+from utils._common import SCHEMA  # noqa: E402
 
 SCHEMA_MD = SKILL_SCRIPTS.parent / "references" / "schema.md"
 

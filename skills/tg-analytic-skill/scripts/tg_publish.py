@@ -30,10 +30,10 @@ from dotenv import load_dotenv
 from telethon.tl.functions.messages import GetScheduledMessagesRequest
 from telethon.tl.types import Message
 
-from _common import DATA_DIR
-from _md2entities import render as render_markdown
-from _render import summarize_schedule
-from _tg import DEFAULT_SESSION, _require_session, channel_session
+from utils._common import DATA_DIR
+from utils._md2entities import render as render_markdown
+from utils._render import summarize_schedule
+from utils._tg import DEFAULT_SESSION, _require_session, channel_session
 
 load_dotenv(DATA_DIR / ".env")
 

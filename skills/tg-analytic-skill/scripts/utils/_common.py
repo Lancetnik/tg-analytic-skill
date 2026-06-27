@@ -1,7 +1,7 @@
 """Shared data home: runtime paths, the SQLite schema, and DB open helpers.
 
-Imported by both tg_scrape.py and tg_query.py (PEP-723 scripts resolve
-same-directory imports because the script's directory is on sys.path).
+Part of the `utils` package; the CLIs import it as `from utils._common import …`
+(`scripts/` is on sys.path), and siblings here import it relatively.
 Must stay stdlib-only so tg_query.py keeps its empty-dependencies property.
 
 The SCHEMA constant below is the single source of truth for the DB layout.

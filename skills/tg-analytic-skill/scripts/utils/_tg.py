@@ -12,7 +12,7 @@ from pathlib import Path
 import typer
 from telethon import TelegramClient
 
-from _common import DATA_DIR
+from ._common import DATA_DIR
 
 DEFAULT_SESSION_FILE = DATA_DIR / "session.session"
 DEFAULT_SESSION = str(DEFAULT_SESSION_FILE)

@@ -12,19 +12,24 @@ drives. Distributed via the `skills` npm CLI (`npx skills@latest add ...`).
   - `scripts/tg_publish.py` — the Telegram-facing **write** CLI: publish paths
     (`schedule`/`reschedule`/`edit`). Isolated from the read scripts on purpose
     (docs/adr/0003).
-  - `scripts/_md2entities.py` — `tg_publish.py` only: walks mistune's Markdown
-    AST straight to Telethon `MessageEntity` objects (no HTML, no sulguk).
-    Tables render as monospace `pre`; UTF-16 offset accounting lives here.
   - `scripts/tg_query.py` — read-only SQL CLI over the per-channel SQLite DB.
-  - `scripts/_common.py` — shared paths, the `SCHEMA` constant (**source of
-    truth** for the DB layout), and DB open helpers. Stdlib-only so
-    `tg_query.py` keeps its empty-dependencies property.
-  - `scripts/_tg.py` — Telethon session/credential plumbing (`_credentials`,
-    `make_client`, `channel_session`, `_require_session`) shared by
-    `tg_scrape.py` and `tg_publish.py`. Telethon-dependent, so kept out of
-    stdlib-only `_common.py`.
-  - `scripts/_render.py` — pure-presentation Markdown renderers (`summarize_*`);
-    plain dicts in, stdout out — no Telethon or SQLite types.
+  - `scripts/utils/` — support **package** for the CLIs, imported as `utils.*`
+    (e.g. `from utils._common import …`); resolves because `scripts/` is on
+    `sys.path`. Modules import each other relatively (`from ._common import …`).
+    - `_common.py` — shared paths, the `SCHEMA` constant (**source of truth**
+      for the DB layout), and DB open helpers. Stdlib-only so `tg_query.py`
+      keeps its empty-dependencies property.
+    - `_tg.py` — Telethon session/credential plumbing (`_credentials`,
+      `make_client`, `channel_session`, `_require_session`) shared by
+      `tg_scrape.py` and `tg_publish.py`. Telethon-dependent, so kept out of
+      stdlib-only `_common.py`.
+    - `_render.py` — pure-presentation Markdown renderers (`summarize_*`);
+      plain dicts in, stdout out — no Telethon or SQLite types.
+    - `_md2entities.py` — `tg_publish.py` only: walks mistune's Markdown AST
+      straight to Telethon `MessageEntity` objects (no HTML, no sulguk). Tables
+      render as monospace `pre`; UTF-16 offset accounting lives here.
+    - `_group.py` — discussion-group service/admin-log classification helpers
+      used by `tg_scrape.py group`.
   - `references/schema.md` — restates `SCHEMA` for the SQL-writing agent; read
     before writing SQL.
   - `references/markup.md` — supported Markdown→Telegram markup for
@@ -40,8 +45,9 @@ drives. Distributed via the `skills` npm CLI (`npx skills@latest add ...`).
 ## Stack
 
 - Python ≥3.10, run via `uv run` (PEP-723 inline deps in each script header).
-  Same-directory imports (`_common`, `_render`, `_tg`) resolve because the
-  script's own directory is on `sys.path`.
+  Shared helpers live in the `scripts/utils/` package; the CLIs import them as
+  `from utils._x import …`, which resolves because the script's own directory
+  (`scripts/`) is on `sys.path`.
 - **mistune** — `tg_publish.py` only: parses the Markdown post body to an AST,
   which `_md2entities.py` walks straight to Telethon `MessageEntity` objects (no
   HTML hop, no sulguk). mistune (CommonMark-ish) over Python-Markdown on

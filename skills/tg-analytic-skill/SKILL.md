@@ -12,7 +12,7 @@ compatibility: >-
 license: Apache-2.0
 metadata:
   author: Lancetnik
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Telegram channel analysis
