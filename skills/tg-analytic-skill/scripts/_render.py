@@ -249,6 +249,36 @@ def summarize_scheduled(channel: str, items: list[dict]) -> None:
         print()
 
 
+def summarize_schedule(channel: str, item: dict, action: str = "Scheduled") -> None:
+    """Confirm one queued/changed post to stdout.
+
+    `action` heads the block — "Scheduled" (new), "Rescheduled" (time changed),
+    or "Edited" (body changed). Nothing is persisted: a scheduled-message id
+    differs from the id the post gets once published and carries no engagement
+    (same rationale as the read-only `scheduled` command)."""
+    now = datetime.now(UTC)
+    when = (item.get("date") or "")[:16].replace("T", " ") or "no date"
+    rel = _rel_when(item.get("date"), now)
+    print(f"\n# {action} post: {channel}\n")
+    print(f"- Publishes: {when} UTC ({rel})")
+    if item.get("requested"):
+        print(f"- Requested: {item['requested']}")
+    print(
+        f"- sched-msg #{item['id']} — distinct from the id the post gets once "
+        "published; not stored in the DB."
+    )
+    if item.get("entities") is not None:
+        print(f"- Formatting entities: {item['entities']}")
+    print("\n## Body preview\n")
+    body = (item.get("text") or "").strip()
+    if body:
+        for line in body.splitlines():
+            print(f"> {line}")
+    else:
+        print("> (empty)")
+    print()
+
+
 def summarize_views(
     channel: str, hours: list, views: list, period_start: str, period_end: str
 ) -> None:

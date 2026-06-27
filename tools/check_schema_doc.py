@@ -5,9 +5,12 @@
 """Guard against drift between SCHEMA (the source of truth, in _common.py)
 and the DDL that references/schema.md restates for the SQL-writing agent.
 
-Run after editing either side:
+Dev-only tooling: skill *users* never run this. It guards the source tree
+while the skill is being developed, so it lives outside the distributed
+skill (tools/, not skills/tg-analytic-skill/scripts/). Run after editing
+either side:
 
-    uv run skills/tg-analytic-skill/scripts/check_schema_doc.py
+    uv run tools/check_schema_doc.py
 
 Exits 0 when every statement matches (modulo whitespace and IF NOT EXISTS),
 1 with a per-statement diff otherwise. The doc's "Full schema at a glance"
@@ -19,10 +22,14 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+SKILL_SCRIPTS = (
+    Path(__file__).resolve().parent.parent
+    / "skills" / "tg-analytic-skill" / "scripts"
+)
+sys.path.insert(0, str(SKILL_SCRIPTS))
 from _common import SCHEMA  # noqa: E402
 
-SCHEMA_MD = Path(__file__).resolve().parent.parent / "references" / "schema.md"
+SCHEMA_MD = SKILL_SCRIPTS.parent / "references" / "schema.md"
 
 
 def normalize(stmt: str) -> str:

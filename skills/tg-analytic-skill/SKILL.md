@@ -1,15 +1,9 @@
 ---
 name: tg-analytic-skill
 description: >-
-  Use this skill when the user wants to analyze a Telegram channel — scrape
-  posts, comments, forwards, and per-post engagement over time, or pull
-  subscriber growth/churn by source and views by hour of day from Telegram's
-  stats API. Also scans the channel's discussion group (or any group the
-  account is in): thread engagement, join/leave events, hourly activity.
-  Covers content, engagement, audience dynamics, and posting
-  performance. Do not use for one-off reads of a single message, for private
-  chats the logged-in account doesn't admin.
-  Runs the bundled tg_scrape.py CLI.
+  Use this skill when the user wants to analyze a Telegram channel — scrape posts, comments, forwards, and per-post engagement over time, or pull subscriber growth/churn by source and views by hour of day from Telegram's stats API. Also scans the channel's discussion group (or any group the account is in): thread engagement, join/leave events, hourly activity.Covers content, engagement, audience dynamics, and posting performance.
+  Can also schedule, reschedule, and edit a future post to the channel (Markdown body rendered to Telegram formatting) — its write capabilities. Do not use for one-off reads of a single message, for private chats the logged-in account doesn't admin.
+  Runs the bundled tg_scrape.py / tg_publish.py / tg_query.py CLIs.
 compatibility: >-
   Requires Python >=3.10 with uv (PEP-723 inline deps install on
   first run) and outbound network access to Telegram's API. Needs Telegram API
@@ -18,7 +12,7 @@ compatibility: >-
 license: Apache-2.0
 metadata:
   author: Lancetnik
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Telegram channel analysis
@@ -77,12 +71,11 @@ uv run <skill_dir>/scripts/tg_scrape.py login
 
 ## CLIs
 
-Two CLIs under `<skill_dir>/scripts/`:
+Three CLIs under `<skill_dir>/scripts/`:
 
-- **`tg_scrape.py`** - talks to Telegram. Commands: `scrape`, `fetch`,
-  `group`, `subscribers`, `views`, `scheduled`.
-- **`tg_query.py`** - read-only SQL against the per-channel SQLite DB at
-  `.tg-analytic/<channel>.db` (leading `@` stripped from filename).
+- **`tg_scrape.py`** - reads from Telegram. Commands: `scrape`, `fetch`, `group`, `subscribers`, `views`, `scheduled`.
+- **`tg_query.py`** - read-only SQL against the per-channel SQLite DB at `.tg-analytic/<channel>.db` (leading `@` stripped from filename).
+- **`tg_publish.py`** - the **write** path. Commands: `schedule` (queue a future post), `reschedule` (retime it), `edit` (rewrite its body). Needs the same session as `tg_scrape.py`.
 
 Run from the **project root** with `uv run <skill_dir>/scripts/<script>.py ...` — the scripts anchor `.tg-analytic/` on the current working directory. Always pass `--channel @name` explicitly. Every command prints a Markdown summary to stdout; lead with that when reporting to the user, then drop into `tg_query.py` for anything deeper.
 
@@ -248,10 +241,44 @@ on the channel; otherwise it logs a clear error and exits 1. Console output only
 — scheduled posts carry no engagement metrics yet and their `sched-msg` ids
 differ from the id a post gets once published, so nothing is persisted to the DB.
 
-### `query` - ad-hoc SQL
+### `tg_publish.py` - `schedule` / `reschedule` / `edit` - the write commands
 
-Read [references/schema.md](references/schema.md) before writing SQL with
-`tg_query.py`. It documents every table, primary key, the repost-direction
+```
+# queue a new post
+uv run <skill_dir>/scripts/tg_publish.py schedule --channel @name \
+  --file post.md --at 2026-06-27T18:00:00+03:00
+
+# move an existing scheduled post to a new time (body unchanged)
+uv run <skill_dir>/scripts/tg_publish.py reschedule --channel @name \
+  --id 182 --at 2026-06-28T19:00:00+03:00
+
+# replace an existing scheduled post's body (time unchanged)
+uv run <skill_dir>/scripts/tg_publish.py edit --channel @name \
+  --id 182 --file revised.md
+```
+
+The **only** commands that write to Telegram; they live in `tg_publish.py`. `reschedule`/`edit` take the `--id` shown by `scheduled` and target the post in place (the `sched-msg` id is stable across an edit).
+
+For `schedule`/`edit`, the body comes from `--file PATH` **or** from **stdin** (`--file -`, or omit `--file`). Drafts usually carry metainfo (a header, trailing notes) that must **not** be published, so produce the clean body and pipe it via a quoted heredoc — no temp file, and backticks/`$`/quotes pass through verbatim:
+
+```
+uv run <skill_dir>/scripts/tg_publish.py schedule --channel @name \
+  --at 2026-06-27T18:00:00+03:00 --file - <<'EOF'
+**Body** with `code`, a price of 40$, and a ||spoiler||.
+EOF
+```
+
+Markdown renders straight to Telegram formatting (no HTML step) — read [references/markup.md](references/markup.md) before writing the body.
+
+`--at` must be **ISO-8601 with a UTC offset** (e.g. `...+03:00`); a naive time with no offset is rejected as ambiguous. The post must be scheduled **at least 1 hour ahead**, so an earlier `--at` exits 1.
+
+Needs **post rights** on the channel and the same session as the scrapers.
+
+Prints a confirmation block (publish time, `sched-msg` id, body preview); nothing is persisted — scheduled ids differ from published ids and carry no engagement. Verify it landed with `scheduled`.
+
+### `tg_query.py` - `query` - ad-hoc SQL
+
+Read [references/schema.md](references/schema.md) before writing SQL with `tg_query.py`. It documents every table, primary key, the repost-direction
 cheat-sheet (who re-shared you vs whom you reposted), and the common joins
 (latest metric per post, re-shares of your posts, repost sources, album items).
 

@@ -1,7 +1,8 @@
 # tg-analytic-skill
 
 A Claude Code skill that scrapes a Telegram channel into a per-channel SQLite
-DB and answers analytics questions over it.
+DB and answers analytics questions over it. It can also queue a future post to
+the channel (the one write capability; everything else only reads).
 
 ## Language
 
@@ -21,6 +22,13 @@ require an originating channel post).
 
 **Post**:
 A message published in the channel. Identified by its channel message id.
+
+**Scheduled post**:
+A post queued for Telegram to publish at a future instant, not yet live. Its
+id is a scheduled-message id distinct from the published-post id it later
+gets, carries no engagement, and is not persisted in the DB. May only be
+queued at least one hour ahead (the minimum lead time).
+_Avoid_: draft, pending post
 
 **Comment**:
 A message in the discussion group replying (directly or transitively) to an auto-forwarded channel post. Stored in `group_messages` with `thread_post_id` set to the originating post's id.

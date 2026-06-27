@@ -9,7 +9,6 @@
 import asyncio
 import json
 import logging
-import os
 import re
 import sqlite3
 from contextlib import asynccontextmanager, closing
@@ -45,6 +44,7 @@ from telethon.tl.types import (
 )
 
 from _common import DATA_DIR, DEFAULT_OUTPUT_DIR, db_path_for, open_db
+from _tg import DEFAULT_SESSION, _require_session, channel_session
 from _group import (
     GroupEvent,
     auto_forward_post_id,
@@ -84,71 +84,6 @@ def _log_progress(done: int, total: int, current: str, id_range: str) -> None:
     log.debug("[%d/%d] processed %s", done, total, current)
     if done == total or done % PROGRESS_EVERY == 0:
         log.info("[%d/%d] processed (ids: %s)", done, total, id_range)
-
-
-DEFAULT_SESSION_FILE = DATA_DIR / "session.session"
-
-
-def _credentials() -> tuple[int, str, str]:
-    """Read TG_API_ID / TG_API_HASH / TG_PHONE lazily, at connect time.
-
-    Reading them at import time would crash even `--help` with a bare KeyError
-    when .tg-analytic/.env doesn't exist yet; deferring turns that into a
-    clear, actionable message on the first command that actually connects."""
-    try:
-        return (
-            int(os.environ["TG_API_ID"]),
-            os.environ["TG_API_HASH"],
-            os.environ["TG_PHONE"],
-        )
-    except KeyError as e:
-        typer.echo(
-            f"Missing {e.args[0]} - put TG_API_ID/TG_API_HASH/TG_PHONE in "
-            f"{DATA_DIR / '.env'} (see the skill's .env.example).",
-            err=True,
-        )
-        raise typer.Exit(code=1) from None
-
-
-def make_client(session_file: str) -> TelegramClient:
-    api_id, api_hash, _ = _credentials()
-    return TelegramClient(str(session_file), api_id, api_hash)
-
-
-def _require_session(session_file: str) -> None:
-    """Fail fast if no Telethon session exists.
-
-    Auth needs an interactive TTY for the SMS code prompt, so it cannot run
-    inside a Bash subprocess. Surface that with a clear message instead of
-    deadlocking on input()."""
-    if not Path(session_file).exists():
-        # Print this script's real path — the skill installs under varying
-        # roots (.claude/skills/, .agents/skills/, the source repo), so a
-        # hardcoded relative path would point nowhere for most users.
-        typer.echo(
-            f"Telegram session not found at {session_file}\n"
-            f"Run `uv run {Path(__file__).resolve()} login` in your own "
-            "terminal first (interactive — needs an SMS code).",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-
-@asynccontextmanager
-async def channel_session(session_file: str, channel: str | None = None):
-    """Connected Telegram client with an owned lifecycle.
-
-    Yields `(client, entity)` — entity resolved when `channel` is given, None
-    otherwise (login). One home for the connect / resolve / disconnect dance
-    every command previously copied; the client never crosses this seam
-    unmanaged."""
-    client = make_client(session_file)
-    await client.start(phone=_credentials()[2])
-    try:
-        entity = await client.get_entity(channel) if channel else None
-        yield client, entity
-    finally:
-        await client.disconnect()
 
 
 @dataclass
@@ -1539,7 +1474,6 @@ VerboseOpt = Annotated[
         f"{PROGRESS_EVERY} posts).",
     ),
 ]
-DEFAULT_SESSION = str(DEFAULT_SESSION_FILE)
 
 
 def _prepare(session_file: str, verbose: bool = False) -> None:

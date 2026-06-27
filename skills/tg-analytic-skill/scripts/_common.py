@@ -6,7 +6,8 @@ Must stay stdlib-only so tg_query.py keeps its empty-dependencies property.
 
 The SCHEMA constant below is the single source of truth for the DB layout.
 references/schema.md restates it for the SQL-writing agent — run
-scripts/check_schema_doc.py after editing either to catch drift.
+tools/check_schema_doc.py (dev-only, at the repo root) after editing
+either to catch drift.
 """
 
 import sqlite3
